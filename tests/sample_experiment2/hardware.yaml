@@ -1,0 +1,67 @@
+memory_buffer_size: 10000
+blue_led_power_mw: "8.2"
+violet_led_power_mw: "4.2"
+widgets:
+  - psychopy
+
+nidaq:
+  device_name: "Dev1"
+  lines: "port1/line0"
+  ctr: "ctr0"
+  io_type: "DO"
+  output:
+    suffix: "nidaq"
+    file_type: "csv"
+  widgets:
+    - "nidaq_test"
+
+encoder:
+  type: "treadmill"
+  port: "COM6"
+  baudrate: 192000
+  output:
+    suffix: "treadmill"
+    file_type: "csv"
+    bids_type: "beh"
+
+cameras:
+  - id: "Dhyana"
+    name: "mesoscope"
+    backend: "micromanager"
+    micromanager_path: "C:/Program Files/Micro-Manager-2.0"
+    configuration_path: "C:/Program Files/Micro-Manager-2.0/mm-sipefield.cfg"
+    properties:
+      Dhyana:
+        Output Trigger Port: 2
+        Gain: "HDR"
+        fps: 49 # IMPORTANT: This is validated externally and is a value used merely to calculate experiment duration and frames to capture
+        viewer_type: "static"
+      Arduino-Shutter: 
+        OnOff: "1"
+      Arduino-Switch: 
+        Sequence: "On"
+      Core:
+        Shutter: "Arduino-Shutter"
+      viewer_type: "static"
+    output:
+      suffix: "meso"
+      file_type: "ome.tiff"
+      bids_type: "func"
+    widgets:
+      - led_control
+
+  - id: "ThorCam"
+    name: "pupil"
+    backend: "micromanager"
+    micromanager_path: "C:/Program Files/Micro-Manager-thor"
+    configuration_path: "C:/Program Files/Micro-Manager-2.0/ThorCam.cfg"
+    properties:
+      ThorCam:
+        Exposure: 35.9 # this is equivalen to setting the camera to 20 fps
+        fps: 20 # IMPORTANT: This is validated externally and is a value used merely to calculate experiment duration and frames to capture
+        ROI: [440, 305, 509, 509]
+        viewer_type: "static"
+    output:
+      suffix: "pupil"
+      file_type: "mp4" # adding the `.` as in ".mp4" will cause an error
+      bids_type: "func"

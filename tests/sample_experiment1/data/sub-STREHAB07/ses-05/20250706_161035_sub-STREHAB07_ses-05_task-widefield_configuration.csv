@@ -1,0 +1,24 @@
+Parameter,Value
+subject,STREHAB07
+session,05
+task,widefield
+start_on_trigger,False
+duration,1200
+trial_duration,
+psychopy_filename,experiment.py
+experiment_id,HFSA
+experimentor,jgronemeyer
+experimenter,jgronemeyer
+protocol,HFSA
+experiment_directory,D:/jgronemeyer/250627_HFSA
+hardware_config_file,D:/jgronemeyer/250627_HFSA/hardware.yaml
+database_path,D:/jgronemeyer/250627_HFSA/database.h5
+protocol_version,1.0
+led_pattern,"['4', '4']"
+sex,F
+genotype,aldh1l1-gcamp8s
+DOB,2025-01-02
+DOS,2025-06-20
+XYZ,"[5.69, 9.55, 21.36]"
+weight,20.30
+PT_s,136

@@ -1,0 +1,100 @@
+{
+  "summary": {
+    "root": "/Users/jakegronemeyer/dev/datakit/tests/sample_experiment1",
+    "total_files": 9,
+    "subjects": [
+      "STREHAB07"
+    ],
+    "sessions": [
+      "ses-05"
+    ],
+    "tasks": [
+      "task-widefield"
+    ],
+    "tags": [
+      "config",
+      "dataqueue",
+      "meso_mean",
+      "meso_metadata",
+      "notes",
+      "pupil_dlc",
+      "pupil_metadata",
+      "timestamps",
+      "treadmill"
+    ]
+  },
+  "entries": [
+    {
+      "tag": "config",
+      "path": "data/sub-STREHAB07/ses-05/20250706_161035_sub-STREHAB07_ses-05_task-widefield_configuration.csv",
+      "origin": "data",
+      "subject": "STREHAB07",
+      "session": "ses-05",
+      "task": "task-widefield"
+    },
+    {
+      "tag": "dataqueue",
+      "path": "data/sub-STREHAB07/ses-05/beh/20250706_161035_sub-STREHAB07_ses-05_task-widefield_dataqueue.csv",
+      "origin": "data",
+      "subject": "STREHAB07",
+      "session": "ses-05",
+      "task": "task-widefield"
+    },
+    {
+      "tag": "meso_mean",
+      "path": "processed/means/20250706_161035_sub-STREHAB07_ses-05_task-widefield_mesoscope.ome_meso-mean-trace.csv",
+      "origin": "processed",
+      "subject": "STREHAB07",
+      "session": "ses-05",
+      "task": "task-widefield"
+    },
+    {
+      "tag": "meso_metadata",
+      "path": "data/sub-STREHAB07/ses-05/func/20250706_161035_sub-STREHAB07_ses-05_task-widefield_mesoscope.ome.tiff_frame_metadata.json",
+      "origin": "data",
+      "subject": "STREHAB07",
+      "session": "ses-05",
+      "task": "task-widefield"
+    },
+    {
+      "tag": "notes",
+      "path": "data/sub-STREHAB07/ses-05/20250706_161035_sub-STREHAB07_ses-05_task-widefield_notes.txt",
+      "origin": "data",
+      "subject": "STREHAB07",
+      "session": "ses-05",
+      "task": "task-widefield"
+    },
+    {
+      "tag": "pupil_dlc",
+      "path": "processed/dlc_output/20250706_161035_sub-STREHAB07_ses-05_task-widefield_pupilDLC_Resnet50_250627_HFSAJul24shuffle1_snapshot_110_full.pickle",
+      "origin": "processed",
+      "subject": "STREHAB07",
+      "session": "ses-05",
+      "task": "task-widefield"
+    },
+    {
+      "tag": "pupil_metadata",
+      "path": "data/sub-STREHAB07/ses-05/func/20250706_161035_sub-STREHAB07_ses-05_task-widefield_pupil.mp4_frame_metadata.json",
+      "origin": "data",
+      "subject": "STREHAB07",
+      "session": "ses-05",
+      "task": "task-widefield"
+    },
+    {
+      "tag": "timestamps",
+      "path": "data/sub-STREHAB07/ses-05/20250706_161035_sub-STREHAB07_ses-05_task-widefield_timestamps.csv",
+      "origin": "data",
+      "subject": "STREHAB07",
+      "session": "ses-05",
+      "task": "task-widefield"
+    },
+    {
+      "tag": "treadmill",
+      "path": "data/sub-STREHAB07/ses-05/beh/20250706_161035_sub-STREHAB07_ses-05_task-widefield_treadmill.csv",
+      "origin": "data",
+      "subject": "STREHAB07",
+      "session": "ses-05",
+      "task": "task-widefield"
+    }
+  ]
+}

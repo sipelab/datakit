@@ -1,0 +1,84 @@
+{
+    "Configuration": {
+        "experimenter": "jgronemeyer",
+        "protocol": "HFSA",
+        "experiment_directory": "D:/jgronemeyer/250627_HFSA",
+        "hardware_config_file": "D:/jgronemeyer/250627_HFSA/hardware.yaml",
+        "database_path": "D:/jgronemeyer/250627_HFSA/database.h5",
+        "protocol_version": "1.0",
+        "duration": 1200,
+        "start_on_trigger": false,
+        "led_pattern": [
+            "4",
+            "4"
+        ]
+    },
+    "Subjects": {
+        "STREHAB07": {
+            "sex": "F",
+            "genotype": "aldh1l1-gcamp8s",
+            "DOB": "2025-01-02",
+            "DOS": "2025-06-20",
+            "session": "10",
+            "task": "widefield",
+            "XYZ": "[5.69, 9.58, 21.45]",
+            "weight": "20.21",
+            "PT_s": "82"
+        },
+        "STREHAB09": {
+            "sex": "M",
+            "genotype": "aldh1l1-gcamp8s",
+            "DOB": "2025-01-02",
+            "DOS": "2025-06-21",
+            "session": "09",
+            "task": "widefield",
+            "XYZ": "[5.41, 9.73, 20.99]",
+            "weight": "25.02",
+            "PT_s": "60"
+        }
+    },
+        "Plugins": {
+        "psychopy": {
+            "enabled": false,
+            "config": {
+                "some_setting": "value"
+            }
+        },
+        "mouseportal": {
+            "enabled": true,
+            "config": {
+                "env_path": "C:/Users/SIPE_LAB/.conda/envs/mouse-portal/python.exe",
+                "script_path": "C:/dev/mouseportal/runportal.py",
+                "window_width": 1920,
+                "window_height": 1080,
+                "segment_length": 10.0,
+                "corridor_width": 8.0,
+                "wall_height": 10.0,
+                "num_segments": 50,
+                "camera_height": 2.0,
+                "speed_scaling": 5.0,
+                "left_wall_texture": "assets/test3.png",
+                "right_wall_texture": "assets/test3.png",
+                "floor_texture": "assets/black.png",
+                "ceiling_texture": "assets/white.png",
+                "data_logging_file": "maze_data.csv",
+                "fog_density": 0.06,
+                "serial_port": "COM6",
+                "event_log_file": "events_log.csv"
+            }
+        }
+    },
+    "DisplayKeys": [
+        "subject",
+        "session",
+        "task",
+        "experimenter",
+        "protocol",
+        "duration",
+        "start_on_trigger",
+        "led_pattern",
+        "XYZ",
+        "weight",
+        "PT_s"
+    ]
+}
