@@ -101,7 +101,13 @@ class WheelEncoder(DataSource):
         frame = frame.dropna(subset=["time_s"]).sort_values("time_s").reset_index(drop=True)
 
         if frame.empty:
-            raise ValueError("Wheel file does not contain usable samples after cleaning")
+            frame = pd.DataFrame(
+            {
+                "time_s": [0.0, 0.0],
+                "click_delta": [0, 0],
+                "speed_mm": [0.0, 0.0],
+            }
+            )
 
         # Ensure speed/clicks missing entries become zeros
         frame["click_delta"] = frame["click_delta"].fillna(0)
