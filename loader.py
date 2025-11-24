@@ -149,11 +149,32 @@ class ExperimentStore:
         payload: dict[tuple[str, str], object] = {}
         for col in df.columns:
             col_series = df[col]
-            if len(col_series) == 1:
-                payload[(prefix, str(col))] = col_series.iloc[0]
-            else:
-                payload[(prefix, str(col))] = col_series.to_numpy()
+            payload[(prefix, str(col))] = self._series_to_cell(col_series)
         return payload
+
+    @staticmethod
+    def _series_to_cell(series: pd.Series) -> object:
+        if series.empty:
+            return np.nan
+        if len(series) == 1:
+            return series.iloc[0]
+        if ExperimentStore._series_is_constant(series):
+            return series.iloc[0]
+        return series.to_numpy()
+
+    @staticmethod
+    def _series_is_constant(series: pd.Series) -> bool:
+        if series.empty:
+            return True
+        try:
+            unique = series.nunique(dropna=False)
+        except TypeError:
+            first = series.iloc[0]
+            try:
+                return bool(series.apply(lambda value: (value == first) or (pd.isna(value) and pd.isna(first))).all())
+            except Exception:
+                return False
+        return unique <= 1
 
     def _load_file(self, path: str, spec: SeriesSpec, idx: Tuple[str, str, str]) -> dict:
         if pd.isna(path):
@@ -177,7 +198,7 @@ class ExperimentStore:
         if isinstance(data, pd.Series):
             if spec.structured:
                 return {(spec.name, "raw_output"): data.to_frame().T}
-            values = data.to_numpy() if len(data) > 1 else data.iloc[0]
+            values = self._series_to_cell(data)
             return {(spec.name, "values"): values}
         if isinstance(data, (np.ndarray, list)):
             return {(spec.name, "values"): np.asarray(data)}
