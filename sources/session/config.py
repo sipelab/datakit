@@ -58,34 +58,6 @@ class SessionConfigSource(DataSource):
     }
     variable_mapping: ClassVar[Dict[str, tuple[str, ...]]] = DEFAULT_VARIABLE_MAPPING.copy()
 
-    @classmethod
-    def configure_variable_mapping(cls, mapping: Mapping[str, Iterable[str]]) -> None:
-        """Configure how configuration keys map to subject/session attributes."""
-
-        normalized: Dict[str, tuple[str, ...]] = {}
-        for scope, fields in mapping.items():
-            scope_key = scope.strip().lower()
-            normalized_fields = []
-            for field in fields:
-                if field is None:
-                    continue
-                field_name = str(field).strip()
-                if not field_name:
-                    continue
-                if field_name not in normalized_fields:
-                    normalized_fields.append(field_name)
-            normalized[scope_key] = tuple(normalized_fields)
-
-        if not normalized:
-            cls.variable_mapping = cls.DEFAULT_VARIABLE_MAPPING.copy()
-        else:
-            cls.variable_mapping = normalized
-
-    @classmethod
-    def reset_variable_mapping(cls) -> None:
-        """Reset to the default variable mapping."""
-
-        cls.variable_mapping = cls.DEFAULT_VARIABLE_MAPPING.copy()
 
     def load(self, path: Path) -> LoadedStream:
         raw_df = pd.read_csv(path)
