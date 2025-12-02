@@ -29,6 +29,7 @@ class PupilDLCSource(DataSource):
     patterns = ("**/*_pupilDLC_*_full.pickle",)
     camera_tag = "pupil_metadata"  # Bind to pupil camera
     version = "1.0"
+    flatten_payload = False
     default_frame_rate_hz = 20.0
     confidence_threshold = 0.7
     pixel_to_mm = 53.6

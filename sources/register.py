@@ -26,7 +26,7 @@ import numpy as np
 from datakit.config import settings
 from ..datamodel import LoadedStream
 
-LoaderFn = Callable[[Path], object]
+LoaderFn = Callable[[Path | str], object]
 
 @dataclass(frozen=True)
 class SourceSpec:
@@ -114,17 +114,54 @@ class DataSource:
     camera_tag: ClassVar[str | None] = None         # provider or binding camera tag
     version: ClassVar[str] = settings.registry.default_version
     is_timeseries: ClassVar[bool] = True            # whether this source produces a time-indexed stream
+    flatten_payload: ClassVar[bool] = True          # True → break into scalar/array columns
 
     def __init_subclass__(cls) -> None:
         """Register subclasses automatically with version support."""
         if not settings.registry.auto_register:
             return
-        if getattr(cls, "tag", None):
-            DataSource.REGISTRY.setdefault(cls.tag, {})[cls.version] = cls
+        tag = getattr(cls, "tag", None)
+        patterns = getattr(cls, "patterns", None)
+        if not tag or not patterns:
+            return
+
+        DataSource.REGISTRY.setdefault(tag, {})[cls.version] = cls
+        spec = cls._as_source_spec()
+        if spec is not None:
+            register_source(spec)
 
     def load(self, path: Path) -> LoadedStream:
         """Load data from the given path. Subclasses must implement this method."""
         raise NotImplementedError(f"{self.__class__.__name__} must implement load() method")
+
+    # ------------------------------------------------------------------
+    # Registration helpers
+    # ------------------------------------------------------------------
+    @classmethod
+    def _patterns_tuple(cls) -> Tuple[str, ...]:
+        patterns = getattr(cls, "patterns", ())
+        if isinstance(patterns, tuple):
+            return patterns
+        return tuple(patterns)
+
+    @classmethod
+    def _build_loader(cls) -> LoaderFn:
+        def _loader(path: Path | str) -> object:
+            instance = cls()
+            return instance.load(Path(path))
+
+        return _loader
+
+    @classmethod
+    def _as_source_spec(cls) -> Optional[SourceSpec]:
+        if not getattr(cls, "tag", None):
+            return None
+        patterns = cls._patterns_tuple()
+        if not patterns:
+            return None
+        loader = cls._build_loader()
+        structured = not getattr(cls, "flatten_payload", True)
+        return SourceSpec(tag=cls.tag, patterns=patterns, loader=loader, structured=structured)
 
     # ------------------------------------------------------------------
     # Helper utilities for subclasses

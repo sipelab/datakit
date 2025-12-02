@@ -20,6 +20,7 @@ class MesoMetadataSource(DataSource):
     patterns = ("**/*_mesoscope.ome.tiff_frame_metadata.json",)
     camera_tag = "meso_metadata"
     version = "1.0"
+    flatten_payload = False
     json_entry_key = "p0"
     metadata_column = "camera_metadata"
     timestamp_preference = ("TimeReceivedByCore", "ElapsedTime-ms", "runner_time_ms")

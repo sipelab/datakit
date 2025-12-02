@@ -19,6 +19,7 @@ class PupilMetadataSource(DataSource):
     patterns = ("**/*_pupil.mp4_frame_metadata.json",)
     camera_tag = "pupil_metadata"
     version = "1.0"
+    flatten_payload = False
     json_entry_key = "p0"
     metadata_column = "camera_metadata"
     timestamp_preference = ("TimeReceivedByCore", "ElapsedTime-ms", "runner_time_ms")

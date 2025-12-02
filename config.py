@@ -28,26 +28,6 @@ class RegistryDefaults:
 
 
 @dataclass
-class SourceCatalog:
-    """Declarative table describing built-in data sources and their patterns."""
-
-    entries: Tuple[Tuple[str, Tuple[str, ...], str, bool], ...] = (
-        ("meso_mean", ("**/*meso-mean-trace.csv",), "load_csv", False),
-        ("timestamps", ("**/*_timestamps.csv",), "load_csv", False),
-        ("dataqueue", ("**/*_dataqueue.csv",), "load_csv", False),
-        ("treadmill", ("**/*_treadmill.csv",), "load_csv", False),
-        ("notes", ("**/*_notes.txt",), "load_session_notes", True),
-    ("session_config", ("**/*_configuration.csv",), "load_session_config", False),
-        ("meso_metadata", ("**/*_mesoscope.ome.tiff_frame_metadata.json",), "load_camera_metadata", True),
-        ("pupil_metadata", ("**/*_pupil.mp4_frame_metadata.json",), "load_camera_metadata", True),
-        ("dlc_pupil", ("**/*_pupilDLC_*.pickle",), "load_dlc_pickle", True),
-        ("psychopy", ("**/*_psychopy.csv",), "load_csv", False),
-        ("wheel", ("**/*_wheel.csv",), "load_csv", False),
-        ("suite2p", ("**/suite2p/**/F.npy",), "load_numpy_array", False),
-    )
-
-
-@dataclass
 class DatasetLayout:
     """Shape and naming expectations for materialized experiment datasets."""
 
@@ -99,7 +79,6 @@ class Settings:
     """Container aggregating all configuration namespaces for callers."""
 
     registry: RegistryDefaults = field(default_factory=RegistryDefaults)
-    sources: SourceCatalog = field(default_factory=SourceCatalog)
     dataset: DatasetLayout = field(default_factory=DatasetLayout)
     timeline: TimelineDefaults = field(default_factory=TimelineDefaults)
     debug: DebugDefaults = field(default_factory=DebugDefaults)

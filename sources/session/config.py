@@ -51,6 +51,7 @@ class SessionConfigSource(DataSource):
     camera_tag = None
     version = "1.0"
     is_timeseries = False
+    flatten_payload = True
 
     DEFAULT_VARIABLE_MAPPING: ClassVar[Dict[str, tuple[str, ...]]] = {
         "subject": ("sex", "genotype", "DOS", "DOB"),

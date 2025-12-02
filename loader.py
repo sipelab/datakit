@@ -1,4 +1,4 @@
-"""Minimal-yet-complete data-ingestion workflow for HFSA experiments.
+"""Data-ingestion workflow.
 
 The module keeps the happy path front-and-centre:
 
@@ -10,9 +10,6 @@ The module keeps the happy path front-and-centre:
    or preserved raw tables for structured outputs).
 4. Persist the resulting dataset out to disk with standard pandas HDF5 helpers.
 
-Everything else—progress logging, provenance tracking, heavy orchestration—is left
-to higher layers so new readers can understand exactly how data lands in the
-analysis-ready table.
 """
 
 from __future__ import annotations
@@ -58,9 +55,7 @@ def _make_loader(tag: str) -> LoaderFn:
 
 def _structured_default(tag: str) -> bool:
     cls = _latest_source_class(tag)
-    if hasattr(cls, "structured_output"):
-        return bool(getattr(cls, "structured_output"))
-    return not getattr(cls, "is_timeseries", True)
+    return not getattr(cls, "flatten_payload", True)
 
 
 @dataclass

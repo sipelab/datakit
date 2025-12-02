@@ -22,6 +22,7 @@ class SessionNotesSource(DataSource):
     patterns = ("**/*_notes.txt",)
     camera_tag = None
     version = "1.0"
+    flatten_payload = False
     line_pattern = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}):\s*(.*)"
     timestamp_format = "%Y-%m-%d %H:%M:%S"
     empty_time_value = 0.0
