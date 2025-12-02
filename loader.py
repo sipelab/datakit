@@ -58,6 +58,8 @@ def _make_loader(tag: str) -> LoaderFn:
 
 def _structured_default(tag: str) -> bool:
     cls = _latest_source_class(tag)
+    if hasattr(cls, "structured_output"):
+        return bool(getattr(cls, "structured_output"))
     return not getattr(cls, "is_timeseries", True)
 
 

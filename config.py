@@ -37,7 +37,7 @@ class SourceCatalog:
         ("dataqueue", ("**/*_dataqueue.csv",), "load_csv", False),
         ("treadmill", ("**/*_treadmill.csv",), "load_csv", False),
         ("notes", ("**/*_notes.txt",), "load_session_notes", True),
-        ("session_config", ("**/*_configuration.csv",), "load_session_config", True),
+    ("session_config", ("**/*_configuration.csv",), "load_session_config", False),
         ("meso_metadata", ("**/*_mesoscope.ome.tiff_frame_metadata.json",), "load_camera_metadata", True),
         ("pupil_metadata", ("**/*_pupil.mp4_frame_metadata.json",), "load_camera_metadata", True),
         ("dlc_pupil", ("**/*_pupilDLC_*.pickle",), "load_dlc_pickle", True),
