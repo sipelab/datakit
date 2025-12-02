@@ -11,19 +11,11 @@ from typing import Dict, Iterable
 
 import pandas as pd
 
-from .datamodel import Manifest, ManifestEntry
-from .discover import DataManifest
+from .datamodel import ManifestEntry
+from .discover import discover_manifest
 from .config import settings
 
 IndexKey = tuple[str, str] | tuple[str, str, str | None]
-
-
-def discover_manifest(experiment_dir: Path) -> Manifest:
-    """Run discovery over ``experiment_dir`` and return a :class:`Manifest`."""
-
-    root = Path(experiment_dir).resolve()
-    manifest = DataManifest(root)
-    return manifest.as_datamodel()
 
 
 def entries_to_inventory(

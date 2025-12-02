@@ -9,7 +9,8 @@ from typing import Any, Iterable, Optional, Sequence, cast
 import pandas as pd
 
 from .datamodel import Manifest
-from .inventory import discover_manifest, entries_to_inventory
+from .discover import discover_manifest
+from .inventory import entries_to_inventory
 
 # Ensure all DataSource subclasses register themselves
 from . import sources as _data_sources  # noqa: F401

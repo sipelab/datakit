@@ -25,7 +25,7 @@ import pandas as pd
 from datakit import logger
 from datakit.config import settings
 from datakit.datamodel import LoadedStream
-from datakit.experiment import ExperimentData
+from datakit.inventory import build_inventory
 from datakit.sources.register import DataSource
 
 
@@ -76,7 +76,7 @@ class SeriesSpec:
 
 
 class ExperimentStore:
-    """Builder that turns an ``ExperimentData`` inventory into a rich DataFrame.
+    """Builder that turns an inventory DataFrame into a rich dataset.
 
     Register one or more :class:`SeriesSpec` instances (each describing a source
     tag, file paths, and loader callable) then call :meth:`materialize` to fetch
@@ -120,8 +120,7 @@ class ExperimentStore:
 
     @staticmethod
     def _build_inventory(root: Path) -> pd.DataFrame:
-        experiment = ExperimentData(root, include_task_level=True)
-        inventory = experiment.data
+        inventory = build_inventory(root, include_task_level=True)
         if not isinstance(inventory.index, pd.MultiIndex):
             raise ValueError("Discovery inventory must provide a MultiIndex")
         index_names = settings.dataset.index_names
@@ -308,7 +307,7 @@ __all__ = ["ExperimentStore", "SeriesSpec", "launch_dataset_shell"]
 
 
 # ---------------------------------------------------------------------------
-# Default pipeline wiring (parity with datakit.dataset)
+# Default pipeline wiring (parity with the removed datakit.dataset helpers)
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -354,8 +353,8 @@ def build_default_dataset(
 ) -> Path:
     """Replicate the classic experiment build using the minimalist loader."""
 
-    experiment = ExperimentData(input_path, include_task_level=True)
-    store = ExperimentStore(experiment.data)
+    inventory_frame = build_inventory(input_path, include_task_level=True)
+    store = ExperimentStore(inventory_frame)
     base_inventory = store.inventory
     missing_columns: list[str] = []
 

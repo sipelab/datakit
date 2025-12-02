@@ -1,97 +1,19 @@
 """Utility primitives for declaring and discovering data sources.
 
-The registry keeps a lightweight mapping of ``tag → SourceSpec`` so the loader
-pipeline can look up which files to scan and which callable should deserialize
-them.  Higher-level helpers in :mod:`datakit.loader` rely on this module to
-bootstrap default sources as well as user-provided extensions.
+Each ``DataSource`` subclass registers itself, allowing discovery and loader
+pipelines to inspect available tags, versions, and declared patterns without
+maintaining parallel metadata structures.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import (
-    Any,
-    Callable,
-    ClassVar,
-    Dict,
-    Iterable,
-    Iterator,
-    Optional,
-    Tuple,
-)
+from typing import Any, ClassVar, Dict, Iterable, Optional
 
 import numpy as np
 
 from datakit.config import settings
 from ..datamodel import LoadedStream
-
-LoaderFn = Callable[[Path | str], object]
-
-@dataclass(frozen=True)
-class SourceSpec:
-    """Description of a registered source.
-
-    Attributes
-    ----------
-    tag:
-        Short identifier that other components reference (e.g. ``"wheel"``).
-    patterns:
-        File glob patterns that tell the discovery step where to look.
-    loader:
-        Callable that receives a :class:`pathlib.Path` and returns the parsed
-        payload, typically a :class:`pandas.DataFrame` or numpy array.
-    structured:
-        Flag used by legacy tooling to differentiate table outputs from raw
-        binary blobs.  The loader does not interpret this flag directly but it
-        is surfaced in metadata for dashboards.
-    """
-
-    tag: str
-    patterns: Tuple[str, ...]
-    loader: LoaderFn
-    structured: bool = False
-
-
-_REGISTRY: Dict[str, SourceSpec] = {}
-
-
-def register_source(spec: SourceSpec) -> SourceSpec:
-    """Insert a fully constructed :class:`SourceSpec` into the registry."""
-
-    _REGISTRY[spec.tag] = spec
-    return spec
-
-
-def register(
-    tag: str,
-    *,
-    patterns: Iterable[str],
-    loader: LoaderFn,
-    structured: bool = False,
-) -> SourceSpec:
-    """Convenience helper to register a source using primitive arguments."""
-
-    spec = SourceSpec(tag=tag, patterns=tuple(patterns), loader=loader, structured=structured)
-    return register_source(spec)
-
-
-def get_source(tag: str) -> SourceSpec:
-    """Return the registered spec for ``tag`` or raise ``KeyError``."""
-
-    return _REGISTRY[tag]
-
-
-def iter_sources() -> Iterator[SourceSpec]:
-    """Iterate over all registered sources in insertion order."""
-
-    return iter(_REGISTRY.values())
-
-
-def list_sources() -> Tuple[SourceSpec, ...]:
-    """Return a tuple snapshot of the registry contents."""
-
-    return tuple(_REGISTRY.values())
 
 
 class DataSource:
@@ -126,42 +48,10 @@ class DataSource:
             return
 
         DataSource.REGISTRY.setdefault(tag, {})[cls.version] = cls
-        spec = cls._as_source_spec()
-        if spec is not None:
-            register_source(spec)
 
     def load(self, path: Path) -> LoadedStream:
         """Load data from the given path. Subclasses must implement this method."""
         raise NotImplementedError(f"{self.__class__.__name__} must implement load() method")
-
-    # ------------------------------------------------------------------
-    # Registration helpers
-    # ------------------------------------------------------------------
-    @classmethod
-    def _patterns_tuple(cls) -> Tuple[str, ...]:
-        patterns = getattr(cls, "patterns", ())
-        if isinstance(patterns, tuple):
-            return patterns
-        return tuple(patterns)
-
-    @classmethod
-    def _build_loader(cls) -> LoaderFn:
-        def _loader(path: Path | str) -> object:
-            instance = cls()
-            return instance.load(Path(path))
-
-        return _loader
-
-    @classmethod
-    def _as_source_spec(cls) -> Optional[SourceSpec]:
-        if not getattr(cls, "tag", None):
-            return None
-        patterns = cls._patterns_tuple()
-        if not patterns:
-            return None
-        loader = cls._build_loader()
-        structured = not getattr(cls, "flatten_payload", True)
-        return SourceSpec(tag=cls.tag, patterns=patterns, loader=loader, structured=structured)
 
     # ------------------------------------------------------------------
     # Helper utilities for subclasses
