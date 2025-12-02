@@ -6,8 +6,9 @@ from __future__ import annotations
 
 # ─── standard python libraries ─────────────────────────────────────────────────────
 import sys
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 # Ensure the project root is importable even when running cells out of context
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -22,7 +23,8 @@ import pandas as pd
 
 # ─── relative module imports ─────────────────────────────────────────────────────
 from datakit.config import settings
-from datakit.discover import DataManifest
+from datakit.datamodel import Manifest
+from datakit.discover import discover_manifest
 from datakit.experiment import ExperimentData
 from datakit.loader import (
     DEFAULT_SOURCES,
@@ -41,6 +43,37 @@ pd.set_option("display.width", 180)
 # Root of the experiment to inspect. Update this path for other runs.
 EXPERIMENT_ROOT = (CURRENT_DIR / Path(*settings.debug.sample_experiment_rel)).resolve()
 print(f"Using experiment root: {EXPERIMENT_ROOT}")
+
+
+def _manifest_summary(manifest: Manifest) -> pd.DataFrame:
+    if not manifest.entries:
+        return pd.DataFrame(columns=["tag", "files", "processed", "data"])
+    stats: dict[str, dict[str, int]] = {}
+    for entry in manifest.entries:
+        tag_stats = stats.setdefault(entry.tag, {"files": 0, "processed": 0, "data": 0})
+        tag_stats["files"] += 1
+        tag_stats[entry.origin] = tag_stats.get(entry.origin, 0) + 1
+    rows = []
+    for tag in sorted(stats.keys()):
+        tag_stats = stats[tag]
+        rows.append({
+            "tag": tag,
+            "files": tag_stats["files"],
+            "processed": tag_stats.get("processed", 0),
+            "data": tag_stats.get("data", 0),
+        })
+    return pd.DataFrame(rows)
+
+
+def _entries_for_tag(manifest: Manifest, tag: str):
+    return [entry for entry in manifest.entries if entry.tag == tag]
+
+
+def _require_tags(manifest: Manifest, *tags: str) -> None:
+    available = {entry.tag for entry in manifest.entries}
+    missing = sorted(tag for tag in tags if tag not in available)
+    if missing:
+        raise ValueError(f"Missing required manifest tags: {', '.join(missing)}")
 
 #%%
 # ─── Tweak Pupil DLC Patterns ─────────────────────────────────────────────────────
@@ -61,8 +94,12 @@ Suite2p.required_files = ("Fneu.npy", "spks.npy", "iscell.npy")
 """
 Discover data files in the experiment root and construct a data manifest.
 """
-manifest = DataManifest(EXPERIMENT_ROOT)
-print(f"Manifest summary: \n {manifest.summary}")
+manifest = discover_manifest(EXPERIMENT_ROOT)
+manifest_summary_df = _manifest_summary(manifest)
+if manifest_summary_df.empty:
+    print("Manifest summary: <no files discovered>")
+else:
+    print("Manifest summary:\n", manifest_summary_df)
 
 
 #%%
@@ -70,7 +107,7 @@ print(f"Manifest summary: \n {manifest.summary}")
 """
 Convert manifest entries to a pandas DataFrame for inspection.
 """
-manifest_df = pd.DataFrame([entry.__dict__ for entry in manifest.entries])
+manifest_df = pd.DataFrame([asdict(entry) for entry in manifest.entries])
 print(manifest_df.head())
 
 
@@ -80,7 +117,7 @@ print(manifest_df.head())
 Ensure required data source tags are present in the manifest, raising an error if missing.
 """
 # required_tags = ("psychopy", "suite2p")
-# manifest.require(*required_tags)
+# _require_tags(manifest, *required_tags)
 # print("Required tags available:", required_tags)
 
 
@@ -190,7 +227,7 @@ Load and examine a specific entry from a chosen data source.
 source_tag = "psychopy"
 ENTRY_INDEX = settings.debug.default_entry_index
 
-entries = manifest.for_tag(source_tag)
+entries = _entries_for_tag(manifest, source_tag)
 
 entry = entries[ENTRY_INDEX]
 entry_path = (EXPERIMENT_ROOT / entry.path).resolve()
