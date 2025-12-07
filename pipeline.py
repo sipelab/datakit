@@ -6,9 +6,8 @@ from __future__ import annotations
 
 # ─── standard python libraries ─────────────────────────────────────────────────────
 import sys
-from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # Ensure the project root is importable even when running cells out of context
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -23,8 +22,7 @@ import pandas as pd
 
 # ─── relative module imports ─────────────────────────────────────────────────────
 from datakit.config import settings
-from datakit.datamodel import Manifest
-from datakit.discover import discover_manifest
+#from datakit.discover import DataManifest
 from datakit.experiment import ExperimentData
 from datakit.loader import (
     DEFAULT_SOURCES,
@@ -41,84 +39,25 @@ pd.set_option("display.max_columns", 60)
 pd.set_option("display.width", 180)
 
 # Root of the experiment to inspect. Update this path for other runs.
-EXPERIMENT_ROOT = (CURRENT_DIR / Path(*settings.debug.sample_experiment_rel)).resolve()
+EXPERIMENT_ROOT = (CURRENT_DIR / Path(r'E:\jgronemeyer\250921_HFSA')).resolve()
 print(f"Using experiment root: {EXPERIMENT_ROOT}")
-
-
-def _manifest_summary(manifest: Manifest) -> pd.DataFrame:
-    if not manifest.entries:
-        return pd.DataFrame(columns=["tag", "files", "processed", "data"])
-    stats: dict[str, dict[str, int]] = {}
-    for entry in manifest.entries:
-        tag_stats = stats.setdefault(entry.tag, {"files": 0, "processed": 0, "data": 0})
-        tag_stats["files"] += 1
-        tag_stats[entry.origin] = tag_stats.get(entry.origin, 0) + 1
-    rows = []
-    for tag in sorted(stats.keys()):
-        tag_stats = stats[tag]
-        rows.append({
-            "tag": tag,
-            "files": tag_stats["files"],
-            "processed": tag_stats.get("processed", 0),
-            "data": tag_stats.get("data", 0),
-        })
-    return pd.DataFrame(rows)
-
-
-def _entries_for_tag(manifest: Manifest, tag: str):
-    return [entry for entry in manifest.entries if entry.tag == tag]
-
-
-def _require_tags(manifest: Manifest, *tags: str) -> None:
-    available = {entry.tag for entry in manifest.entries}
-    missing = sorted(tag for tag in tags if tag not in available)
-    if missing:
-        raise ValueError(f"Missing required manifest tags: {', '.join(missing)}")
-
+roots = [r'E:\jgronemeyer\250921_HFSA',
+         r'D:\jgronemeyer\240324_HFSA',
+         r'D:\jgronemeyer\250627_HFSA']
 #%%
 # ─── Tweak Pupil DLC Patterns ─────────────────────────────────────────────────────
 """
 Modify the search patterns for Pupil DLC sources before running discovery.
 """
+from datakit.sources import MesoMetadataSource, PupilMetadataSource
 # add a custom glob for prototype exports
-custom_pattern = ("**/*_full.pickle",)
-PupilDLCSource.patterns = custom_pattern
-print("Updated Pupil DLC patterns:", PupilDLCSource.patterns)
+meso_patterns = ("**/*_mesoscope.ome.tiff_frame_metadata.json",
+                  "**/*_meso.ome.tiff_frame_metadata.json")
+pupil_patterns = ("**/*_pupil.mp4_frame_metadata.json",
+                  "**/*_pupil.ome.tiff_frame_metadata.json")
+MesoMetadataSource.patterns = meso_patterns
+PupilMetadataSource.patterns = pupil_patterns
 
-from datakit.sources import Suite2p
-Suite2p.required_files = ("Fneu.npy", "spks.npy", "iscell.npy")
-
-
-#%%
-# ─── Discover Files and Build Manifest ─────────────────────────────────────────────────────
-"""
-Discover data files in the experiment root and construct a data manifest.
-"""
-manifest = discover_manifest(EXPERIMENT_ROOT)
-manifest_summary_df = _manifest_summary(manifest)
-if manifest_summary_df.empty:
-    print("Manifest summary: <no files discovered>")
-else:
-    print("Manifest summary:\n", manifest_summary_df)
-
-
-#%%
-# ─── Inspect Manifest as DataFrame ─────────────────────────────────────────────────────
-"""
-Convert manifest entries to a pandas DataFrame for inspection.
-"""
-manifest_df = pd.DataFrame([asdict(entry) for entry in manifest.entries])
-print(manifest_df.head())
-
-
-#%%
-# ─── Require Specific Data Source Tags ─────────────────────────────────────────────────────
-"""
-Ensure required data source tags are present in the manifest, raising an error if missing.
-"""
-# required_tags = ("psychopy", "suite2p")
-# _require_tags(manifest, *required_tags)
-# print("Required tags available:", required_tags)
 
 
 #%%
@@ -126,7 +65,7 @@ Ensure required data source tags are present in the manifest, raising an error i
 """
 Create an inventory of experiment data with MultiIndex on Subject/Session/Task.
 """
-experiment = ExperimentData(EXPERIMENT_ROOT, include_task_level=True)
+experiment = ExperimentData(roots, include_task_level=True)
 inventory = experiment.data.copy()
 print(inventory.head())
 
@@ -137,17 +76,6 @@ print(inventory.head())
 Set up a minimal experiment store with default data sources registered.
 """
 store = ExperimentStore(inventory)
-missing_sources: list[str] = []
-for src in DEFAULT_SOURCES:
-    if src.tag not in inventory.columns:
-        missing_sources.append(src.tag)
-        continue
-    store.register_series(src.logical_name, inventory[src.tag], loader=src.loader, structured=src.structured)
-
-if missing_sources:
-    print("Skipping sources missing from inventory:", sorted(missing_sources))
-else:
-    print("All default sources registered.")
 
 
 #%%
@@ -155,9 +83,24 @@ else:
 """
 Generate the dataset DataFrame from the experiment store.
 """
-dataset = store.materialize()
-print(dataset.head())
+from datakit.loader import ExperimentStore, DEFAULT_SOURCES
 
+inventory = ExperimentData(roots, include_task_level=True).data
+store = ExperimentStore(inventory)
+
+for src in DEFAULT_SOURCES:
+    if src.tag in inventory.columns:
+        store.register_series(src.logical_name, inventory[src.tag], src.loader, structured=src.structured)
+
+dataset = store.materialize()
+#%%
+print("Dataset summary:")
+print("Columns:", dataset.columns.tolist())
+print("Data types:\n", dataset.dtypes)
+print("\nStructure:")
+dataset.info(verbose=False)
+print("\nTop rows:")
+print(dataset.head())
 #%%
 # ─── Inspect metadata ─────────────────────────────────────────────────────
 meta = store.meta_frame              # normalized per-stream metadata
@@ -227,13 +170,12 @@ Load and examine a specific entry from a chosen data source.
 source_tag = "psychopy"
 ENTRY_INDEX = settings.debug.default_entry_index
 
-entries = _entries_for_tag(manifest, source_tag)
+entries = manifest.for_tag("psychopy")
 
-entry = entries[ENTRY_INDEX]
-entry_path = (EXPERIMENT_ROOT / entry.path).resolve()
+entry_path = entries[0].path
 print(f"Loading {source_tag} entry at index {ENTRY_INDEX}: {entry_path}")
 
-source = DataSource.create_loader(source_tag)
+source = DataSource.create_loader("psychopy")
 loaded = source.load(entry_path)
 print(type(loaded))
 print(loaded)
@@ -286,3 +228,61 @@ print("Updated desired_tags:", settings.dataset.desired_tags)
 # Revert to avoid polluting later cells.
 settings.dataset.desired_tags = original_tags
 print("Restored desired_tags:", settings.dataset.desired_tags)
+
+
+#%%
+# ─── Load and Merge ─────────────────────────────────────────────────────
+experiments = [r'D:\jgronemeyer\240324_HFSA', r'E:\jgronemeyer\250921_HFSA', r'D:\jgronemeyer\250627_HFSA']
+INSPECT_SOURCES = ("dataqueue", "timestamps")
+
+def load_inventory(path: Path) -> pd.DataFrame:
+    experiment = ExperimentData(path, include_task_level=True)
+    return experiment.data
+
+
+def inspect_sources(frame: pd.DataFrame, label: str) -> None:
+    for source in INSPECT_SOURCES:
+        if source not in frame.columns:
+            print(f"[inspect] {label}: missing '{source}' column entirely")
+            continue
+        series = frame[source]
+        present = series.notna().sum()
+        total = len(series)
+        print(f"[inspect] {label}: '{source}' populated for {present}/{total} rows")
+        if present == 0:
+            sample_index = list(series.index[:3])
+            print(f"           first few index entries without '{source}': {sample_index}")
+
+
+def merge_inventories(paths) -> pd.DataFrame:
+    frames = []
+    for raw in paths:
+        resolved = raw.expanduser().resolve()
+        if not resolved.exists() or not resolved.is_dir():
+            raise FileNotFoundError(f"Experiment directory missing: {resolved}")
+        frame = load_inventory(resolved)
+        inspect_sources(frame, resolved.name)
+        frames.append(frame)
+        print(f"Loaded {resolved} -> shape {frame.shape}")
+    return pd.concat(frames, sort=False)
+
+
+experiment_paths = [Path(p) for p in experiments]
+merged = merge_inventories(experiment_paths)
+merged_store = ExperimentStore(merged)
+
+merged_missing: list[str] = []
+for src in DEFAULT_SOURCES:
+    if src.tag not in merged.columns:
+        merged_missing.append(src.tag)
+        continue
+    merged_store.register_series(src.logical_name, merged[src.tag], loader=src.loader, structured=src.structured)
+
+if merged_missing:
+    print("Merged inventory missing sources:", sorted(merged_missing))
+else:
+    print("Merged inventory includes all default sources.")
+
+#%%
+dataset = merged_store.materialize()
+# %%

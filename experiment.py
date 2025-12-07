@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Sequence as SequenceABC
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence, cast
 
@@ -14,6 +15,59 @@ from .inventory import entries_to_inventory
 
 # Ensure all DataSource subclasses register themselves
 from . import sources as _data_sources  # noqa: F401
+
+
+PathLike = Path | str
+ManifestSource = Manifest | PathLike | Sequence[PathLike]
+
+
+def _coerce_manifest(source: ManifestSource) -> Manifest:
+    if isinstance(source, Manifest):
+        return source
+
+    if isinstance(source, (str, Path)):
+        return discover_manifest(Path(source))
+
+    if isinstance(source, SequenceABC):
+        if isinstance(source, (str, bytes, bytearray)):
+            return discover_manifest(Path(source))
+
+        normalized: list[Path] = []
+        for index, entry in enumerate(source):
+            if isinstance(entry, Manifest):
+                raise TypeError("Manifest objects are not supported inside source sequences")
+            if not isinstance(entry, (str, Path)):
+                raise TypeError(
+                    f"Unsupported entry type at position {index}: {type(entry).__name__}"
+                )
+            normalized.append(Path(entry))
+
+        if not normalized:
+            raise ValueError("source sequence must contain at least one path")
+
+        if len(normalized) == 1:
+            return discover_manifest(normalized[0])
+
+        return _combine_manifests(normalized)
+
+    raise TypeError(f"Unsupported source type: {type(source).__name__}")
+
+
+def _combine_manifests(paths: Sequence[Path]) -> Manifest:
+    manifests = [discover_manifest(path) for path in paths]
+    combined_entries = []
+
+    for manifest in manifests:
+        for entry in manifest.entries:
+            absolute_path = (manifest.root / entry.path).resolve()
+            combined_entries.append(replace(entry, path=absolute_path.as_posix()))
+
+    if not combined_entries:
+        joined = ", ".join(str(path) for path in paths)
+        raise ValueError(f"No files discovered across directories: {joined}")
+
+    combined_entries.sort(key=lambda entry: (entry.tag, entry.path))
+    return Manifest(root=Path("."), entries=combined_entries)
 
 
 @dataclass(frozen=True)
@@ -35,16 +89,13 @@ class ExperimentData:
 
     def __init__(
         self,
-        source: Path | str | Manifest,
+        source: ManifestSource,
         *,
         prefer_processed: bool = True,
         absolute_paths: bool = True,
         include_task_level: bool | None = None,
     ) -> None:
-        if isinstance(source, Manifest):
-            manifest = source
-        else:
-            manifest = discover_manifest(Path(source))
+        manifest = _coerce_manifest(source)
 
         inventory = entries_to_inventory(
             manifest.entries,
