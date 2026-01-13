@@ -42,7 +42,21 @@ class PupilMetadataSource(DataSource):
         with open(path, 'r') as f:
             data = json.load(f)
         
-        p0_data = data[self.json_entry_key]
+        p0_data = data.get(self.json_entry_key)
+        entry_key_used = self.json_entry_key
+
+        if p0_data is None:
+            # Fallback: use the first available entry if the expected key is missing.
+            if isinstance(data, dict) and data:
+                entry_key_used, p0_data = next(iter(data.items()))
+            else:
+                raise KeyError(
+                    f"Missing expected entry '{self.json_entry_key}' in {path}; found keys: {list(data.keys()) if isinstance(data, dict) else 'n/a'}"
+                )
+
+        if p0_data is None:
+            raise ValueError(f"No usable metadata entries found in {path}")
+
         df = pd.DataFrame(p0_data)
 
         device_id = None
@@ -50,7 +64,9 @@ class PupilMetadataSource(DataSource):
             device_id = str(df[self.device_column].iloc[0])
 
         camera_metadata_df = pd.json_normalize(df[self.metadata_column].tolist())
-        df = df.join(camera_metadata_df)
+        # Avoid collisions when nested metadata repeats top-level columns.
+        non_overlapping = [col for col in camera_metadata_df.columns if col not in df.columns]
+        df = df.join(camera_metadata_df[non_overlapping])
 
         existing_columns = [col for col in self.drop_columns if col in df.columns]
         df.drop(columns=existing_columns, inplace=True)
@@ -90,6 +106,7 @@ class PupilMetadataSource(DataSource):
             meta={
                 "source_file": str(path),
                 "n_frames": len(df),
-                "device_id": device_id
+                "device_id": device_id,
+                "json_entry_key": entry_key_used,
             }
         )
