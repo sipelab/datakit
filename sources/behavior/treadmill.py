@@ -36,6 +36,13 @@ class TreadmillSource(DataSource):
     # Small cushion around gaps where we force the speed down to zero.
     smoothing_zero_pad_offset_s = 0.05
 
+    # Column name preferences
+    timestamp_column = "timestamp"
+    distance_columns = ("distance_mm", "distance")
+    speed_columns = ("speed_mm", "speed_mm_s", "speed")
+    output_distance_column = "distance_mm"
+    output_speed_column = "speed_mm"
+
     # Minimum absolute speed to count the animal as moving.
     locomotion_speed_thresh = 2.0
     # Maximum pause duration (in ms) that still belongs to the same locomotion bout.
@@ -320,13 +327,23 @@ class TreadmillSource(DataSource):
         return np.array(final_times), np.array(final_speeds)
 
     def load(self, path: Path) -> LoadedStream:
-        timeline = GlobalTimeline.for_directory(path.parent)
+        timeline = None
+        timeline_factory = getattr(GlobalTimeline, "for_directory", None)
+        if callable(timeline_factory):
+            try:
+                timeline = timeline_factory(path.parent)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "TreadmillSource: failed to build timeline, falling back to CSV",
+                    extra={"phase": "treadmill_timeline", "path": str(path), "error": repr(exc)},
+                )
+
         logger.debug(
             "TreadmillSource.load",
             extra={
                 "phase": "treadmill_load",
                 "path": str(path),
-                "timeline_source": str(timeline.source_path) if timeline else None,
+                "timeline_source": str(getattr(timeline, "source_path", None)) if timeline else None,
             },
         )
 
@@ -339,7 +356,7 @@ class TreadmillSource(DataSource):
                     extra={
                         "phase": "treadmill_timeline",
                         "path": str(path),
-                        "timeline_source": str(timeline.source_path),
+                        "timeline_source": str(getattr(timeline, "source_path", None)),
                         "error": repr(exc),
                     },
                 )
@@ -466,24 +483,39 @@ class TreadmillSource(DataSource):
         )
     
     def _load_from_csv(self, path: Path) -> LoadedStream:
-        """Fallback: Load treadmill data directly from CSV with wraparound handling."""
+        """Fallback: Load treadmill data directly from CSV with wraparound handling.
+
+        Accepts both legacy columns (distance/speed) and standardized
+        distance_mm/speed_mm naming; output is always distance_mm/speed_mm.
+        """
         df = pd.read_csv(path)
-        
-        expected_cols = {'timestamp', 'distance', 'speed'}
-        if not expected_cols.issubset(df.columns):
-            raise ValueError(f"Expected columns {expected_cols} not found in {path}")
-        
-        df_unwrapped = self._unwrap_treadmill_data(df)
-        timestamps_us = df_unwrapped['timestamp'].values
+
+        timestamp_col = self.timestamp_column
+        distance_col = next((c for c in self.distance_columns if c in df.columns), None)
+        speed_col = next((c for c in self.speed_columns if c in df.columns), None)
+
+        if timestamp_col not in df.columns or distance_col is None or speed_col is None:
+            raise ValueError(
+                f"Expected columns including '{timestamp_col}' and distance/speed variants not found in {path}"
+            )
+
+        df_unwrapped = self._unwrap_treadmill_data(df, distance_col=distance_col, speed_col=speed_col)
+        timestamps_us = df_unwrapped[timestamp_col].values
         t = (timestamps_us - timestamps_us[0]) / self.seconds_to_microseconds
 
-        df_unwrapped = df_unwrapped.rename(columns={'distance': 'distance_mm', 'speed': 'speed_mm'})
+        df_unwrapped = df_unwrapped.rename(
+            columns={distance_col: self.output_distance_column, speed_col: self.output_speed_column}
+        )
         df_unwrapped["time_elapsed_s"] = t
 
         locomotion_bouts = self.detect_locomotion_bouts(
-            timestamps_us, df_unwrapped['speed_mm'].values, df_unwrapped['distance_mm'].values
+            timestamps_us,
+            df_unwrapped[self.output_speed_column].values,
+            df_unwrapped[self.output_distance_column].values,
         )
-        smooth_times, smooth_speeds = self._create_smooth_speed_trace(t, df_unwrapped['speed_mm'].values)
+        smooth_times, smooth_speeds = self._create_smooth_speed_trace(
+            t, df_unwrapped[self.output_speed_column].values
+        )
 
         return LoadedStream(
             tag=self.tag,
@@ -498,7 +530,7 @@ class TreadmillSource(DataSource):
             },
         )
     
-    def _unwrap_treadmill_data(self, df):
+    def _unwrap_treadmill_data(self, df, *, distance_col: str, speed_col: str):
         if df.empty:
             return df
 
@@ -508,8 +540,8 @@ class TreadmillSource(DataSource):
 
         result = df.copy().reset_index(drop=True)
         result['timestamp'] = timestamps
-        if 'distance' in result.columns:
-            result['distance'] = result['distance'] - result['distance'].iloc[0]
+        if distance_col in result.columns:
+            result[distance_col] = result[distance_col] - result[distance_col].iloc[0]
         return result
     
     def _unwrap_teensy_timestamps(self, timestamps_us, rollover_val=None):
