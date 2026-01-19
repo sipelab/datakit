@@ -34,22 +34,25 @@ class DatasetLayout:
     index_names: Tuple[str, str, str] = ("Subject", "Session", "Task")
     desired_tags: Tuple[str, ...] = (
         "meso_mean",
+        "mesomap",
         "timestamps",
         "dataqueue",
-        "psychopy",
+        # "psychopy",
+        "treadmill",
         "wheel",
         "notes",
         "session_config",
         "meso_metadata",
         "pupil_metadata",
-        "dlc_pupil",
+        "pupil_dlc",
         "suite2p",
     )
     logical_name_overrides: Dict[str, str] = field(default_factory=lambda: {
         "meso_metadata": "meso_meta",
         "pupil_metadata": "pupil_meta",
-        "dlc_pupil": "pupil",
+        "pupil_dlc": "pupil",
         "wheel": "encoder",
+        "dataqueue": "time",
     })
     meta_columns: Tuple[str, ...] = ("Subject", "Session", "Task", "Source", "Key", "Value", "dtype")
     scope_key: str = "scope"

@@ -15,6 +15,7 @@ from .behavior.dataqueue import DataqueueSource
 from .behavior.wheel import WheelEncoder
 from .behavior.psychopy import Psychopy
 from .analysis.mesoscope import MesoMeanSource
+from .analysis.mesomap import MesoMapSource
 from .analysis.pupil import PupilDLCSource
 from .session.config import SessionConfigSource
 from .session.notes import SessionNotesSource
@@ -29,6 +30,7 @@ __all__ = [
     "WheelEncoder",
     "Psychopy",
     "MesoMeanSource",
+    "MesoMapSource",
     "PupilDLCSource",
     "SessionConfigSource",
     "SessionNotesSource",
