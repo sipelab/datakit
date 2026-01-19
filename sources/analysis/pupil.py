@@ -26,10 +26,11 @@ class PupilDLCSource(DataSource):
     plot immediately without re-running post-processing code.
     """
     tag = "pupil_dlc"
-    patterns = ("**/*_pupilDLC_*_full.pickle",)
+    patterns = ("**/*_pupilDLC_*_full.pickle", 
+                "**/*_full.pickle",)
     camera_tag = "pupil_metadata"  # Bind to pupil camera
     version = "1.0"
-    flatten_payload = False
+    flatten_payload = True
     default_frame_rate_hz = 20.0
     confidence_threshold = 0.7
     pixel_to_mm = 53.6
