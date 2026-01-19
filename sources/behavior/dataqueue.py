@@ -6,7 +6,7 @@ It is commonly used to align per-device clocks (treadmill, cameras, nidaq) by
 extracting anchor pairs for downstream timeline fitting.
 """
 
-from typing import Optional
+from typing import Optional, Iterable
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -20,124 +20,233 @@ class DataqueueSource(DataSource):
     tag = "dataqueue"
     patterns = ("**/*_dataqueue.csv",)
     camera_tag = None
-    version = "1.0"
+    version = "1.1"
     time_column = "queue_elapsed"
     device_id_column = "device_id"
     device_timestamp_column = "device_ts"
     optional_time_columns = ("queue_elapsed",)
     payload_column = "payload"
+    master_device_priority: tuple[str, ...] = ("dhyana", "mesoscope")
+    device_alias_patterns: tuple[tuple[str, str], ...] = (
+        ("dhyana", "meso"),
+        ("mesoscope", "meso"),
+        ("thorcam", "pupil"),
+    )
     
     def load(self, path: Path) -> LoadedStream:
         """Read ``*_dataqueue.csv`` and derive alignment helpers."""
-        df = pd.read_csv(path, low_memory=False)
+        raw = pd.read_csv(path, low_memory=False)
 
-        if self.time_column not in df.columns:
+        if self.time_column not in raw.columns:
             raise ValueError(f"Dataqueue file missing required time column '{self.time_column}': {path}")
 
-        queue_elapsed = pd.to_numeric(df[self.time_column], errors="coerce")
-        queue_elapsed = queue_elapsed.to_numpy(dtype=np.float64)
+        queue_numeric = pd.to_numeric(raw[self.time_column], errors="coerce")
+        queue_elapsed = queue_numeric.to_numpy(dtype=np.float64)
         if queue_elapsed.size == 0:
             raise ValueError("Dataqueue has no timing samples")
 
-        t = queue_elapsed - queue_elapsed[0]
-        df = df.copy()
-        df["time_elapsed_s"] = t
-        absolute = self._coerce_device_ts(df.get(self.device_timestamp_column))
-        if absolute is not None:
-            df["time_absolute"] = absolute
-        
-        return LoadedStream(
-            tag=self.tag,
-            t=t.astype(np.float64),
-            value=df,
-            meta={
-                "source_file": str(path),
-                "n_entries": len(df),
-                "anchors": self._extract_device_anchors(df, queue_elapsed[0]),
-                "device_catalog": self._build_device_catalog(df),
-                "device_ids": self._list_device_ids(df),
+        queue_start = float(queue_elapsed[0])
+        t = queue_elapsed - queue_start
+
+        master_id = self._select_master_device(raw)
+        master_elapsed = self._master_elapsed(raw, master_id, queue_start)
+        if master_elapsed.size == 0:
+            master_elapsed = t
+
+        device_elapsed = self._build_device_elapsed(raw, queue_start)
+        device_ts = self._build_device_ts(raw)
+        device_aliases = self._build_device_aliases(raw)
+
+        affine = self._fit_master_affine(raw, master_id, queue_start)
+        device_aligned = self._apply_affine(device_elapsed, affine)
+
+        payload_array = raw.get(self.payload_column)
+        payload_values: Iterable[object]
+        if payload_array is not None:
+            payload_values = payload_array.to_numpy()
+        else:
+            payload_values = np.array([], dtype=object)
+
+        # Single-row summary so the dataset stores dicts/arrays directly in the cells
+        summary = pd.DataFrame(
+            {
+                self.time_column: [t.astype(np.float64)],
+                f"{self.device_timestamp_column}_raw": [raw.get(self.device_timestamp_column, pd.Series(dtype=object)).to_numpy()],
+                self.device_id_column: [raw.get(self.device_id_column, pd.Series(dtype=object)).astype(str).fillna("").to_numpy()],
+                self.payload_column: [payload_values],
+                "master_device_id": [master_id],
+                "master_elapsed_s": [master_elapsed.astype(np.float64)],
+                "device_ts": [device_ts],
+                "device_elapsed": [device_elapsed],
+                "device_aligned_abs": [device_aligned],
+                "device_sample_rate_hz": [self._estimate_device_rates(device_elapsed)],
+                "device_aliases": [device_aliases],
+                "affine": [affine],
             }
         )
 
-    @staticmethod
-    def _coerce_device_ts(series: Optional[pd.Series]) -> Optional[pd.Series]:
-        """Best-effort parse of per-device timestamps into ISO strings."""
-        if series is None:
+        meta = {
+            "source_file": str(path),
+            "n_entries": len(raw),
+            "master_device_id": master_id,
+            "time_basis": master_id,
+        }
+
+        return LoadedStream(tag=self.tag, t=master_elapsed.astype(np.float64), value=summary, meta=meta)
+
+    def _select_master_device(self, df: pd.DataFrame) -> str:
+        """Pick the device used as the master time basis."""
+
+        if self.device_id_column not in df.columns:
+            return "master"
+
+        ids = df[self.device_id_column].astype(str).fillna("")
+        for pattern in self.master_device_priority:
+            mask = ids.str.contains(pattern, case=False, regex=False)
+            if mask.any():
+                return str(ids[mask].iloc[0])
+
+        non_empty = ids[ids != ""]
+        if not non_empty.empty:
+            return str(non_empty.iloc[0])
+        return "master"
+
+    def _master_elapsed(self, df: pd.DataFrame, master_id: str, queue_start: float) -> np.ndarray:
+        """Return elapsed seconds for the master device relative to queue start."""
+
+        device_series = df.get(self.device_id_column)
+        if device_series is None:
+            return np.array([], dtype=np.float64)
+
+        mask = device_series.astype(str) == master_id
+        master_rows = df.loc[mask]
+        if master_rows.empty:
+            return np.array([], dtype=np.float64)
+
+        master_queue = pd.to_numeric(master_rows[self.time_column], errors="coerce").dropna()
+        if master_queue.empty:
+            return np.array([], dtype=np.float64)
+
+        return master_queue.to_numpy(dtype=np.float64) - float(queue_start)
+
+    def _estimate_rate(self, timeline: np.ndarray) -> float:
+        if timeline.size < 2:
+            return 0.0
+        diffs = np.diff(timeline)
+        diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+        if diffs.size == 0:
+            return 0.0
+        return float(1.0 / np.median(diffs))
+
+    def _build_device_elapsed(self, df: pd.DataFrame, queue_start: float) -> dict[str, np.ndarray]:
+        """Return per-device elapsed seconds from queue timestamps."""
+
+        device_elapsed: dict[str, np.ndarray] = {}
+        if self.device_id_column not in df.columns:
+            return device_elapsed
+
+        for device_id, group in df.groupby(self.device_id_column):
+            device_key = str(device_id)
+            queue_rel = pd.to_numeric(group[self.time_column], errors="coerce").to_numpy(dtype=np.float64)
+            queue_rel = queue_rel - float(queue_start)
+            order = np.argsort(queue_rel)
+            device_elapsed[device_key] = queue_rel[order]
+        return device_elapsed
+
+    def _build_device_ts(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+        """Return per-device raw timestamps as ISO strings when possible."""
+
+        device_ts: dict[str, np.ndarray] = {}
+        if self.device_id_column not in df.columns or self.device_timestamp_column not in df.columns:
+            return device_ts
+
+        for device_id, group in df.groupby(self.device_id_column):
+            device_key = str(device_id)
+            parsed = pd.to_datetime(group[self.device_timestamp_column], errors="coerce", utc=True)
+            if parsed.isna().all():
+                device_ts[device_key] = group[self.device_timestamp_column].to_numpy()
+            else:
+                device_ts[device_key] = parsed.dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ").to_numpy()
+        return device_ts
+
+    def _build_device_aliases(self, df: pd.DataFrame) -> dict[str, str]:
+        """Map device identifiers to configured aliases (e.g., Dhyana → meso)."""
+
+        aliases: dict[str, str] = {}
+        if self.device_id_column not in df.columns:
+            return aliases
+
+        ids = df[self.device_id_column].dropna().astype(str).unique().tolist()
+        for device_id in ids:
+            alias = self._alias_for_device(device_id)
+            if alias is not None:
+                aliases[device_id] = alias
+        return aliases
+
+    def _alias_for_device(self, device_id: str) -> Optional[str]:
+        lowered = device_id.lower()
+        for pattern, alias in self.device_alias_patterns:
+            if pattern.lower() in lowered:
+                return alias
+        return None
+
+    def _fit_master_affine(
+        self,
+        df: pd.DataFrame,
+        master_id: str,
+        queue_start: float,
+    ) -> dict[str, float] | None:
+        """Fit affine map from elapsed seconds to absolute time using master device."""
+
+        if self.device_id_column not in df.columns or self.device_timestamp_column not in df.columns:
             return None
-        parsed = pd.to_datetime(series, errors="coerce", utc=True)
-        if parsed.isna().all():
+
+        master_rows = df.loc[df[self.device_id_column].astype(str) == master_id]
+        if master_rows.empty:
             return None
-        return parsed.dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
-    @classmethod
-    def _extract_device_anchors(cls, df: pd.DataFrame, queue_start: float) -> dict[str, list[tuple[float, float]]]:
-        """Extract device-specific anchor pairs from a dataqueue dataframe."""
-        anchors: dict[str, list[tuple[float, float]]] = {}
+        elapsed = pd.to_numeric(master_rows[self.time_column], errors="coerce").to_numpy(dtype=np.float64)
+        elapsed = elapsed - float(queue_start)
+        absolute = pd.to_datetime(master_rows[self.device_timestamp_column], errors="coerce", utc=True)
+        if elapsed.size < 2 or absolute.isna().all():
+            return None
 
-        if (
-            cls.device_id_column not in df.columns
-            or cls.device_timestamp_column not in df.columns
-            or cls.time_column not in df.columns
-        ):
-            return anchors
+        valid_mask = np.isfinite(elapsed) & ~absolute.isna()
+        if valid_mask.sum() < 2:
+            return None
 
-        for device_id, group in df.groupby(cls.device_id_column):
-            device_ts = group[cls.device_timestamp_column]
+        elapsed = elapsed[valid_mask]
+        absolute = absolute[valid_mask]
 
-            try:
-                master_times = np.asarray(group[cls.time_column], dtype=float) - float(queue_start)
-            except Exception:
-                continue
+        e0 = float(elapsed[0])
+        e1 = float(elapsed[-1])
+        a0 = float(absolute.iloc[0].value) / 1e9
+        a1 = float(absolute.iloc[-1].value) / 1e9
+        if e1 == e0:
+            return None
 
-            if len(master_times) == 0:
-                continue
+        a = (a1 - a0) / (e1 - e0)
+        b = a0 - a * e0
+        return {"a": float(a), "b": float(b)}
 
-            try:
-                # Prefer timestamp parsing for string-based device clocks
-                device_dt = pd.to_datetime(device_ts, errors='raise')
-                device_rel = (device_dt - device_dt.iloc[0]).dt.total_seconds().values
-            except Exception:
-                try:
-                    device_numeric = np.asarray(device_ts, dtype=float)
-                    device_rel = device_numeric - device_numeric[0]
-                except Exception:
-                    continue
+    def _apply_affine(
+        self,
+        device_elapsed: dict[str, np.ndarray],
+        affine: dict[str, float] | None,
+    ) -> dict[str, np.ndarray]:
+        """Project elapsed times into aligned absolute seconds (UTC)."""
 
-            if len(device_rel) != len(master_times):
-                length = min(len(device_rel), len(master_times))
-                device_rel = device_rel[:length]
-                master_times = master_times[:length]
+        if affine is None:
+            return {}
+        a = affine.get("a")
+        b = affine.get("b")
+        if a is None or b is None:
+            return {}
 
-            anchors[str(device_id)] = list(zip(master_times.astype(float), device_rel.astype(float)))
+        aligned: dict[str, np.ndarray] = {}
+        for device_id, elapsed in device_elapsed.items():
+            aligned[device_id] = (a * elapsed + b).astype(np.float64)
+        return aligned
 
-        return anchors
-
-    @classmethod
-    def _list_device_ids(cls, df: pd.DataFrame) -> list[str]:
-        """Return the unique device identifiers present in the queue."""
-        if cls.device_id_column not in df.columns:
-            return []
-        ids = df[cls.device_id_column].dropna().astype(str)
-        return list(dict.fromkeys(ids))
-
-    @classmethod
-    def _build_device_catalog(cls, df: pd.DataFrame) -> dict[str, dict[str, object]]:
-        """Summarize rows/columns per device for quick UX previews."""
-        catalog: dict[str, dict[str, object]] = {}
-
-        if cls.device_id_column not in df.columns:
-            return catalog
-
-        for device_id, group in df.groupby(cls.device_id_column):
-            entry: dict[str, object] = {
-                "rows": int(len(group)),
-                "columns": list(group.columns),
-            }
-            if cls.time_column in group.columns:
-                queue = pd.to_numeric(group[cls.time_column], errors='coerce').dropna()
-                if not queue.empty:
-                    entry['queue_start'] = float(queue.iloc[0])
-                    entry['queue_stop'] = float(queue.iloc[-1])
-            catalog[str(device_id)] = entry
-
-        return catalog
+    def _estimate_device_rates(self, device_elapsed: dict[str, np.ndarray]) -> dict[str, float]:
+        return {device_id: self._estimate_rate(values) for device_id, values in device_elapsed.items()}

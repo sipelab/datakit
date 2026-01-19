@@ -133,7 +133,9 @@ class ExperimentStore:
         return inventory
 
     def register_series(self, name: str, files: pd.Series, loader: LoaderFn, *, structured: bool = False) -> None:
-        spec = SeriesSpec(name=name, files=files, loader=loader, structured=structured)
+        logical_overrides = settings.dataset.logical_name_overrides
+        resolved_name = logical_overrides.get(name, name)
+        spec = SeriesSpec(name=resolved_name, files=files, loader=loader, structured=structured)
         self._specs.append(spec.aligned_to(self.inventory.index))
 
     # ------------------------------------------------------------------
