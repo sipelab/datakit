@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-# ─── standard python libraries ─────────────────────────────────────────────────────
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -15,12 +14,8 @@ PROJECT_ROOT = CURRENT_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-
-# ─── third-party imports ─────────────────────────────────────────────────────
 import pandas as pd
 
-
-# ─── relative module imports ─────────────────────────────────────────────────────
 from datakit.config import settings
 #from datakit.discover import DataManifest
 from datakit.experiment import ExperimentData
@@ -33,166 +28,80 @@ from datakit.loader import (
 from datakit.sources.register import DataSource
 from datakit.sources.analysis.pupil import PupilDLCSource
 import numpy as np
+import matplotlib.pyplot as plt
 
 # Display pandas objects more readably while debugging
 pd.set_option("display.max_columns", 60)
 pd.set_option("display.width", 180)
 
-# Root of the experiment to inspect. Update this path for other runs.
-EXPERIMENT_ROOT = (CURRENT_DIR / Path(r'E:\jgronemeyer\250921_HFSA')).resolve()
-print(f"Using experiment root: {EXPERIMENT_ROOT}")
-roots = [r'E:\jgronemeyer\250921_HFSA',
-         r'D:\jgronemeyer\240324_HFSA',
-         r'D:\jgronemeyer\250627_HFSA']
-#%%
-# ─── Tweak Pupil DLC Patterns ─────────────────────────────────────────────────────
-"""
-Modify the search patterns for Pupil DLC sources before running discovery.
-"""
-from datakit.sources import MesoMetadataSource, PupilMetadataSource
-# add a custom glob for prototype exports
-meso_patterns = ("**/*_mesoscope.ome.tiff_frame_metadata.json",
-                  "**/*_meso.ome.tiff_frame_metadata.json")
-pupil_patterns = ("**/*_pupil.mp4_frame_metadata.json",
-                  "**/*_pupil.ome.tiff_frame_metadata.json")
-MesoMetadataSource.patterns = meso_patterns
-PupilMetadataSource.patterns = pupil_patterns
 
+
+# ─── Quick-Test Helper ───────────────────────────────────────────────────────────
+"""
+Return a small slice of the inventory for quick tests.
+"""
+def slice_inventory(frame: pd.DataFrame, entries: Any = 3) -> pd.DataFrame:
+    if isinstance(entries, int):
+        return frame.iloc[:entries].copy()
+    return frame.loc[list(entries)].copy()
 
 
 #%%
-# ─── Build Experiment Inventory ─────────────────────────────────────────────────────
-"""
-Create an inventory of experiment data with MultiIndex on Subject/Session/Task.
-"""
-experiment = ExperimentData(roots, include_task_level=True)
-inventory = experiment.data.copy()
-print(inventory.head())
+# ─── Test a DataSource loader ───────────────────────────────────────────────────
 
-
-#%%
-# ─── Prepare Experiment Store ─────────────────────────────────────────────────────
-"""
-Set up a minimal experiment store with default data sources registered.
-"""
-store = ExperimentStore(inventory)
-
-
-#%%
-# ─── Materialize Dataset ─────────────────────────────────────────────────────
-"""
-Generate the dataset DataFrame from the experiment store.
-"""
-from datakit.loader import ExperimentStore, DEFAULT_SOURCES
-
-inventory = ExperimentData(roots, include_task_level=True).data
-store = ExperimentStore(inventory)
-
-for src in DEFAULT_SOURCES:
-    if src.tag in inventory.columns:
-        store.register_series(src.logical_name, inventory[src.tag], src.loader, structured=src.structured)
-
-dataset = store.materialize()
-#%%
-print("Dataset summary:")
-print("Columns:", dataset.columns.tolist())
-print("Data types:\n", dataset.dtypes)
-print("\nStructure:")
-dataset.info(verbose=False)
-print("\nTop rows:")
-print(dataset.head())
-#%%
-# ─── Inspect metadata ─────────────────────────────────────────────────────
-meta = store.meta_frame              # normalized per-stream metadata
-session_info = store.session_attrs   # dict keyed by (subject, session)
-tbases = store.time_basis            # per-source basis strings
-print("Treadmill time basis:", store.time_basis.get("treadmill", "<missing>"))
-
-
-#%%
-# ─── Explore Metadata and Session Attributes ────────────────────────────────────
-"""
-Inspect per-source metadata, session-level attributes from config, and time bases.
-"""
-print("\nMeta rows (first 10):")
-print(store.meta_frame.head(10))
-
-print("\nSession attributes (first 5 entries):")
-for key, attrs in list(store.session_attrs.items())[:5]:
-    print(key, attrs)
-
-print("\nExperiment attributes:")
-print(store.experiment_attrs)
-
-print("\nTime basis per source:")
-print(store.time_basis)
-
-
-#%%
-# ─── Metadata / Time Basis Checks ─────────────────────────────────────
-"""
-Sanity-check that metadata columns match config and every recorded time basis is well-formed.
-"""
-expected_meta_columns = list(settings.dataset.meta_columns)
-missing_meta_columns = [col for col in expected_meta_columns if col not in store.meta_frame.columns]
-if missing_meta_columns:
-    raise AssertionError(f"Missing metadata columns: {missing_meta_columns}")
-
-source_col = expected_meta_columns[3] if len(expected_meta_columns) > 3 else "Source"
-if source_col in store.meta_frame.columns and not store.meta_frame.empty:
-    null_sources = store.meta_frame[source_col].isna().sum()
-    print(f"{null_sources} metadata rows missing {source_col} tag")
-else:
-    print("No metadata rows to validate against source tags.")
-
-invalid_time_bases = {src: basis for src, basis in store.time_basis.items() if not isinstance(basis, str) or not basis}
-if invalid_time_bases:
-    raise AssertionError(f"Invalid time basis entries: {invalid_time_bases}")
-
-print("Metadata/time-basis checks passed.")
-
-
-#%%
-# ─── Persist Dataset to Disk ─────────────────────────────────────────────────────
-"""
-Save the dataset to an HDF file on disk for later use.
-"""
-output_path: Optional[Path] = None  # Set to a Path to customise the output location
-hdf_path = build_default_dataset(EXPERIMENT_ROOT, output_path=output_path)
-print(f"Dataset stored at: {hdf_path}")
-
-
-#%%
-# ─── Explore Single Data Source Entry ─────────────────────────────────────────────────────
-"""
-Load and examine a specific entry from a chosen data source.
-"""
 source_tag = "psychopy"
-ENTRY_INDEX = settings.debug.default_entry_index
+experiment_root = Path(r"F:\251215_ETOH_RO1").resolve()
+experiment = ExperimentData(experiment_root, include_task_level=True)
+inventory = experiment.data
 
-entries = manifest.for_tag("psychopy")
+# Get a file path from the inventory with the source_tag
+# If you do not want to generate the inventory first, just simply to the filepath directly
+entry = Path(inventory[source_tag].iloc[0]).resolve()
 
-entry_path = entries[0].path
-print(f"Loading {source_tag} entry at index {ENTRY_INDEX}: {entry_path}")
+# All DataSource subclasses are registered and created via a factory method using the tag
+loader = DataSource.create_loader(source_tag)
 
-source = DataSource.create_loader("psychopy")
-loaded = source.load(entry_path)
+# `entry` is a Path to a file for the given source_tag
+loaded = loader.load(entry)
+
 print(type(loaded))
 print(loaded)
 
+#%%
+# ─── Build a dataset ───────────────────────────────────────────────────
+
+# Build dataset for F:\251215_ETOH_RO1
+etoH_root = Path(r"F:\251205_ETOH_RO1").resolve()
+etoH_experiment = ExperimentData(etoH_root, include_task_level=True)
+sliced_inventory = slice_inventory(etoH_experiment.data)
+
+store = ExperimentStore(sliced_inventory)
+
+for src in DEFAULT_SOURCES:
+    if src.tag in sliced_inventory.columns:
+        store.register_series(src.logical_name, sliced_inventory[src.tag], src.loader, structured=src.structured)
+
+dataset = store.materialize()
 
 #%%
-# ─── Inspect Loaded Payload ─────────────────────────────────────────────────────
-"""
-Examine the payload from the loaded data stream if available.
-"""
-if hasattr(loaded, "payload"):
-    payload = loaded.payload
-    print(f"Payload kind: {payload.kind}")
-    if hasattr(payload, "data_view"):
-        print(payload.data_view)
-else:
-    print("Loaded object does not expose a payload attribute.")
+#%%
+# ─── Build Dataset Function and Save dataset to disk ─────────────────────────────────────────────────────
+
+# As opposed to the steps above, the build_default_dataset function
+# handles the entire experiment inventory and dataset building in one step.
+# This saves to an HDF5 file on disk and returns the path to that file.
+etoH_dataset_path = build_default_dataset(etoH_root)
+print(f"ETOH dataset stored at: {etoH_dataset_path}")
+
+# Load HDF5 into pandas and save as pickle
+etoH_loaded = pd.read_hdf(etoH_dataset_path)
+etoH_pickle_path = etoH_dataset_path.with_suffix(".pkl")
+etoH_loaded.to_pickle(etoH_pickle_path)
+print(f"ETOH dataset pickled to: {etoH_pickle_path}")
+
+# Load pickle into memory; `dataset` variable
+dataset = pd.read_pickle(r"F:\251215_ETOH_RO1\processed\260116_dataset_mvp.pkl")
+print("Loaded dataset from pickle with shape", dataset.shape)
 
 
 #%%
@@ -211,23 +120,6 @@ for tag, versions in registry.items():
 overview_df = pd.DataFrame(overview).sort_values("tag")
 print(overview_df)
 
-
-#%%
-# ─── Settings Override Checks ─────────────────────────────────────
-"""
-Ensure runtime overrides (e.g., toggling DatasetLayout.desired_tags) take effect.
-"""
-original_tags = settings.dataset.desired_tags
-custom_tag = "custom_debug_tag"
-test_tags = tuple(list(original_tags) + [custom_tag])
-
-settings.dataset.desired_tags = test_tags
-assert settings.dataset.desired_tags == test_tags
-print("Updated desired_tags:", settings.dataset.desired_tags)
-
-# Revert to avoid polluting later cells.
-settings.dataset.desired_tags = original_tags
-print("Restored desired_tags:", settings.dataset.desired_tags)
 
 
 #%%
@@ -283,6 +175,8 @@ if merged_missing:
 else:
     print("Merged inventory includes all default sources.")
 
-#%%
+
 dataset = merged_store.materialize()
+
+
 # %%
