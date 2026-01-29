@@ -37,24 +37,28 @@ def _ensure_datasource_registry() -> None:
     from datakit import sources as _  # noqa: F401
 
 
-def _latest_source_class(tag: str) -> type[DataSource]:
+def _source_class(tag: str, version: str | None = None) -> type[DataSource]:
     registry = DataSource.get_registered_sources()
     if tag not in registry:
         raise KeyError(f"No data source registered for tag '{tag}'")
-    latest_version = DataSource.get_latest_version(tag)
-    return registry[tag][latest_version]
+    if version is None:
+        version = DataSource.get_latest_version(tag)
+    if version not in registry[tag]:
+        available = list(registry[tag].keys())
+        raise KeyError(f"Version '{version}' not registered for tag '{tag}'. Available: {available}")
+    return registry[tag][version]
 
 
-def _make_loader(tag: str) -> LoaderFn:
+def _make_loader(tag: str, version: str | None = None) -> LoaderFn:
     def load(path_str: str) -> object:
-        source = DataSource.create_loader(tag)
+        source = DataSource.create_loader(tag, version=version)
         return source.load(Path(path_str))
 
     return load
 
 
-def _structured_default(tag: str) -> bool:
-    cls = _latest_source_class(tag)
+def _structured_default(tag: str, version: str | None = None) -> bool:
+    cls = _source_class(tag, version=version)
     return not getattr(cls, "flatten_payload", True)
 
 
@@ -137,6 +141,45 @@ class ExperimentStore:
         resolved_name = logical_overrides.get(name, name)
         spec = SeriesSpec(name=resolved_name, files=files, loader=loader, structured=structured)
         self._specs.append(spec.aligned_to(self.inventory.index))
+
+    def register_source(
+        self,
+        tag: str,
+        files: pd.Series,
+        *,
+        version: str | None = None,
+        logical_name: str | None = None,
+        structured: bool | None = None,
+    ) -> None:
+        if structured is None:
+            structured = _structured_default(tag, version=version)
+        loader = _make_loader(tag, version=version)
+        logical_overrides = settings.dataset.logical_name_overrides
+        resolved_name = logical_name or logical_overrides.get(tag, tag)
+        self.register_series(resolved_name, files, loader, structured=structured)
+
+    def register_sources(
+        self,
+        tags: Iterable[str],
+        *,
+        versions: Dict[str, str] | None = None,
+        logical_name_overrides: Dict[str, str] | None = None,
+    ) -> list[str]:
+        overrides = versions or {}
+        name_overrides = logical_name_overrides or settings.dataset.logical_name_overrides
+        missing: list[str] = []
+        for tag in tags:
+            if tag not in self.inventory.columns:
+                missing.append(tag)
+                continue
+            logical_name = name_overrides.get(tag, tag)
+            self.register_source(
+                tag,
+                self.inventory[tag],
+                version=overrides.get(tag),
+                logical_name=logical_name,
+            )
+        return missing
 
     # ------------------------------------------------------------------
     # Materialization helpers
@@ -225,6 +268,11 @@ class ExperimentStore:
                 df.columns = pd.MultiIndex.from_product([["default"], df.columns], names=["Source", "Feature"])
         self._materialized = df
         self._finalize_meta_frame()
+        df.attrs["meta_frame"] = self.meta_frame
+        df.attrs["session_attrs"] = dict(self.session_attrs)
+        df.attrs["experiment_attrs"] = dict(self.experiment_attrs)
+        df.attrs["time_basis"] = dict(self.time_basis)
+        df.attrs["meta_columns"] = list(self._meta_columns())
         return df
 
     # ------------------------------------------------------------------
@@ -351,7 +399,9 @@ def build_default_dataset(
     input_path: Path,
     *,
     output_path: Optional[Path] = None,
-    sources: Iterable[DefaultSource] = DEFAULT_SOURCES,
+    sources: Iterable[DefaultSource] | None = DEFAULT_SOURCES,
+    tags: Iterable[str] | None = None,
+    versions: Dict[str, str] | None = None,
 ) -> Path:
     """Replicate the classic experiment build using the minimalist loader."""
 
@@ -360,14 +410,19 @@ def build_default_dataset(
     base_inventory = store.inventory
     missing_columns: list[str] = []
 
-    for src in sources:
-        if src.tag in base_inventory.columns:
-            series = base_inventory[src.tag]
-        else:
-            missing_columns.append(src.tag)
-            continue
+    if tags is not None:
+        missing_columns = store.register_sources(tags, versions=versions)
+    elif sources is not None:
+        for src in sources:
+            if src.tag in base_inventory.columns:
+                series = base_inventory[src.tag]
+            else:
+                missing_columns.append(src.tag)
+                continue
 
-        store.register_series(src.logical_name, series, loader=src.loader, structured=src.structured)
+            store.register_series(src.logical_name, series, loader=src.loader, structured=src.structured)
+    else:
+        missing_columns = store.register_sources(settings.dataset.desired_tags, versions=versions)
 
     if missing_columns:
         logger.warning(

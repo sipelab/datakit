@@ -20,7 +20,6 @@ from datakit.config import settings
 #from datakit.discover import DataManifest
 from datakit.experiment import ExperimentData
 from datakit.loader import (
-    DEFAULT_SOURCES,
     ExperimentStore,
     build_default_dataset,
     launch_dataset_shell,
@@ -30,9 +29,29 @@ from datakit.sources.analysis.pupil import PupilDLCSource
 import numpy as np
 import matplotlib.pyplot as plt
 
+from dataclasses import dataclass
+from typing import Callable
+
 # Display pandas objects more readably while debugging
 pd.set_option("display.max_columns", 60)
 pd.set_option("display.width", 180)
+
+
+# ─── Pipeline-Local Source Selection ───────────────────────────────────────────
+PIPELINE_TAGS = (
+    "meso_mean",
+    "timestamps",
+    "dataqueue",
+    "treadmill",
+    "wheel",
+    "notes",
+    "session_config",
+    "meso_metadata",
+    "pupil_metadata",
+    "pupil_dlc",
+)
+
+PIPELINE_VERSIONS = {"treadmill": "2.0"}
 
 
 
@@ -76,10 +95,7 @@ etoH_experiment = ExperimentData(etoH_root, include_task_level=True)
 sliced_inventory = slice_inventory(etoH_experiment.data)
 
 store = ExperimentStore(sliced_inventory)
-
-for src in DEFAULT_SOURCES:
-    if src.tag in sliced_inventory.columns:
-        store.register_series(src.logical_name, sliced_inventory[src.tag], src.loader, structured=src.structured)
+store.register_sources(PIPELINE_TAGS, versions=PIPELINE_VERSIONS)
 
 dataset = store.materialize()
 
@@ -162,13 +178,7 @@ def merge_inventories(paths) -> pd.DataFrame:
 experiment_paths = [Path(p) for p in experiments]
 merged = merge_inventories(experiment_paths)
 merged_store = ExperimentStore(merged)
-
-merged_missing: list[str] = []
-for src in DEFAULT_SOURCES:
-    if src.tag not in merged.columns:
-        merged_missing.append(src.tag)
-        continue
-    merged_store.register_series(src.logical_name, merged[src.tag], loader=src.loader, structured=src.structured)
+merged_missing = merged_store.register_sources(PIPELINE_TAGS, versions=PIPELINE_VERSIONS)
 
 if merged_missing:
     print("Merged inventory missing sources:", sorted(merged_missing))
