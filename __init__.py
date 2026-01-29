@@ -9,6 +9,7 @@ ceremony.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Final
 
 _LOGGER_NAME: Final[str] = "datakit"
@@ -21,6 +22,13 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
     logger.propagate = False
+
+if os.getenv("DATAKIT_SAFE_MODE") == "1":
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 
 __all__ = ["logger", "ExperimentData"]
 
