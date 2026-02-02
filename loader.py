@@ -217,45 +217,65 @@ class ExperimentStore:
                 return False
         return unique <= 1
 
-    def _load_file(self, path: str, spec: SeriesSpec, idx: Tuple[str, str, str]) -> dict:
+    def _load_file_result(
+        self,
+        path: str,
+        spec: SeriesSpec,
+        idx: Tuple[str, str, str],
+    ) -> tuple[dict, Dict[str, Any] | None]:
         if pd.isna(path):
-            return {}
+            return {}, None
         data = spec.loader(path)
         if isinstance(data, LoadedStream):
-            self._record_meta(idx, spec.name, data.meta)
             payload = data.value
             if isinstance(payload, pd.DataFrame):
-                return self._flatten_frame(payload, spec.name, spec.structured)
+                return self._flatten_frame(payload, spec.name, spec.structured), data.meta
             if isinstance(payload, pd.Series):
                 values = payload.to_numpy() if len(payload) > 1 else payload.iloc[0]
-                return {(spec.name, "values"): values}
+                return {(spec.name, "values"): values}, data.meta
             if isinstance(payload, (np.ndarray, list)):
-                return {(spec.name, "values"): np.asarray(payload)}
-            return {(spec.name, "value"): payload}
+                return {(spec.name, "values"): np.asarray(payload)}, data.meta
+            return {(spec.name, "value"): payload}, data.meta
         if isinstance(data, dict):
             data = pd.DataFrame(data)
         if isinstance(data, pd.DataFrame):
-            return self._flatten_frame(data, spec.name, spec.structured)
+            return self._flatten_frame(data, spec.name, spec.structured), None
         if isinstance(data, pd.Series):
             if spec.structured:
-                return {(spec.name, "raw_output"): data.to_frame().T}
+                return {(spec.name, "raw_output"): data.to_frame().T}, None
             values = self._series_to_cell(data)
-            return {(spec.name, "values"): values}
+            return {(spec.name, "values"): values}, None
         if isinstance(data, (np.ndarray, list)):
-            return {(spec.name, "values"): np.asarray(data)}
-        return {(spec.name, "value"): data}
+            return {(spec.name, "values"): np.asarray(data)}, None
+        return {(spec.name, "value"): data}, None
 
-    def materialize(self) -> pd.DataFrame:
+    def _load_file(self, path: str, spec: SeriesSpec, idx: Tuple[str, str, str]) -> dict:
+        data, meta = self._load_file_result(path, spec, idx)
+        if meta:
+            self._record_meta(idx, spec.name, meta)
+        return data
+
+    def materialize(self, *, progress: bool = False) -> pd.DataFrame:
         if not self._specs:
             raise RuntimeError("No sources registered. Call register_series first.")
         self._reset_meta_state()
-        rows: List[dict] = []
-        for idx in self.inventory.index:
-            row: dict[tuple[str, str], object] = {}
-            for spec in self._specs:
+        rows_by_idx = {idx: {} for idx in self.inventory.index}
+        total_loads = len(self.inventory.index) * len(self._specs)
+        bar = None
+        if progress:
+            from tqdm import tqdm
+            bar = tqdm(total=total_loads, desc="materialize", unit="load")
+        for spec in self._specs:
+            if bar is not None:
+                bar.set_description(f"materialize:{spec.name}")
+            for idx in self.inventory.index:
                 path = spec.files.loc[idx]
-                row.update(self._load_file(path, spec, idx))
-            rows.append(row)
+                rows_by_idx[idx].update(self._load_file(path, spec, idx))
+                if bar is not None:
+                    bar.update(1)
+        if bar is not None:
+            bar.close()
+        rows = [rows_by_idx[idx] for idx in self.inventory.index]
         df = pd.DataFrame(rows, index=self.inventory.index)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns.set_names(["Source", "Feature"], inplace=True)
