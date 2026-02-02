@@ -15,7 +15,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd
-
 from datakit.config import settings
 #from datakit.discover import DataManifest
 from datakit.experiment import ExperimentData
@@ -28,7 +27,6 @@ from datakit.sources.register import DataSource
 from datakit.sources.analysis.pupil import PupilDLCSource
 import numpy as np
 import matplotlib.pyplot as plt
-
 from dataclasses import dataclass
 from typing import Callable
 
@@ -39,21 +37,18 @@ pd.set_option("display.width", 180)
 
 # ─── Pipeline-Local Source Selection ───────────────────────────────────────────
 PIPELINE_TAGS = (
-    "meso_mean",
+    "suite2p",
     "timestamps",
     "dataqueue",
-    "treadmill",
+    "psychopy",
     "wheel",
     "notes",
     "session_config",
-    "meso_metadata",
     "pupil_metadata",
     "pupil_dlc",
 )
 
 PIPELINE_VERSIONS = {"treadmill": "2.0"}
-
-
 
 # ─── Quick-Test Helper ───────────────────────────────────────────────────────────
 """
@@ -69,7 +64,7 @@ def slice_inventory(frame: pd.DataFrame, entries: Any = 3) -> pd.DataFrame:
 # ─── Test a DataSource loader ───────────────────────────────────────────────────
 
 source_tag = "psychopy"
-experiment_root = Path(r"F:\251215_ETOH_RO1").resolve()
+experiment_root = Path(r"E:\Projects\ACUTEVIS").resolve()
 experiment = ExperimentData(experiment_root, include_task_level=True)
 inventory = experiment.data
 
@@ -90,9 +85,9 @@ print(loaded)
 # ─── Build a dataset ───────────────────────────────────────────────────
 
 # Build dataset for F:\251215_ETOH_RO1
-etoH_root = Path(r"F:\251205_ETOH_RO1").resolve()
+etoH_root = Path(r"E:\Projects\ACUTEVIS").resolve()
 etoH_experiment = ExperimentData(etoH_root, include_task_level=True)
-sliced_inventory = slice_inventory(etoH_experiment.data)
+sliced_inventory = etoH_experiment.data
 
 store = ExperimentStore(sliced_inventory)
 store.register_sources(PIPELINE_TAGS, versions=PIPELINE_VERSIONS)
