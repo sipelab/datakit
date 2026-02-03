@@ -80,6 +80,7 @@ def _extract_gratings_trials(raw: pd.DataFrame) -> pd.DataFrame:
         "trials.thisN",
         "display_gratings.started",
         "stim_grayScreen.started",
+        "stim_grating.started",
         "display_gratings.stopped",
     ]
     return _select_columns(raw, columns)
