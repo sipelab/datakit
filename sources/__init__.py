@@ -10,6 +10,7 @@ the DataSource registry and support versioning.
 from .camera.mesoscope import MesoMetadataSource
 from .camera.pupil import PupilMetadataSource
 from .camera.suite2p import Suite2p
+from .camera.suite2pV2 import Suite2pV2
 from .behavior.treadmill import TreadmillSource
 from .behavior.dataqueue import DataqueueSource
 from .behavior.wheel import WheelEncoder
@@ -25,6 +26,7 @@ __all__ = [
     "MesoMetadataSource",
     "PupilMetadataSource",
     "Suite2p",
+    "Suite2pV2",
     "TreadmillSource",
     "DataqueueSource",
     "WheelEncoder",
