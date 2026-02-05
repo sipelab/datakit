@@ -22,12 +22,11 @@ class Suite2pV2(DataSource):
     patterns = ("**/*_suite2p/**/F.npy",)
     version = "2.0"
 
-    required_files: Tuple[str, ...] = ("Fneu.npy", "spks.npy", "iscell.npy")
+    required_files: Tuple[str, ...] = ("Fneu.npy", "iscell.npy")
     optional_files: Tuple[str, ...] = ("ops.npy", "stat.npy")
 
     COLUMN_MAP: Dict[Tuple[str, str], str] = {
         ("raw", "cell_identifier"): "cell_identifier",
-        ("raw", "spike_rate"): "spike_rate",
         ("raw", "stat"): "stat",
         ("raw", "ops"): "ops",
         ("raw", "plane_directory"): "plane_directory",
@@ -47,7 +46,7 @@ class Suite2pV2(DataSource):
 
     NEUROPIL_SCALE = 0.3
     BASELINE_PERCENTILE = 3.0
-    TARGET_RATE_HZ = 10.0
+    TARGET_RATE_HZ = 15.0
     SMOOTHING_KERNEL = 3
     PEAK_PROMINENCE = 0.3
     MIN_TIMELINE_POINTS = 2
@@ -80,7 +79,6 @@ class Suite2pV2(DataSource):
 
         raw_section = {
             "cell_identifier": ancillary["iscell"],
-            "spike_rate": self._ensure_float32(ancillary["spks"]),
             "stat": ancillary["stat"],
             "ops": ancillary["ops"],
             "plane_directory": str(plane_dir),
@@ -513,23 +511,9 @@ class Suite2pV2(DataSource):
 
         companions: Dict[str, Any] = {}
         companions["Fneu"] = self._ensure_float32(self._load_array(plane_dir / "Fneu.npy"))
-        companions["spks"] = self._ensure_float32(self._load_array(plane_dir / "spks.npy"))
         companions["iscell"] = self._ensure_numeric_dtype(
             np.load(plane_dir / "iscell.npy", allow_pickle=False)
         )
-
-        expected_cells, expected_frames = f_shape
-        for key in ("Fneu", "spks"):
-            arr = companions[key]
-            if arr.shape[0] != expected_cells or arr.shape[1] != expected_frames:
-                raise ValueError(
-                    f"Suite2p file {key}.npy shape {arr.shape} does not match F.npy shape {f_shape}"
-                )
-        if companions["iscell"].shape[0] != expected_cells:
-            raise ValueError(
-                f"Suite2p file iscell.npy first dimension {companions['iscell'].shape[0]}"
-                f" does not match number of ROIs {expected_cells}"
-            )
 
         missing_optional: List[str] = []
 
