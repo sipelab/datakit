@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datakit"
+version = "2025.11.22"
+description = "Datakit utilities"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+
+[project.scripts]
+datakit = "datakit.__main__:main"
+
+[tool.setuptools]
+package-dir = { datakit = "datakit" }
+packages = [
+    "datakit",
+    "datakit.sources",
+    "datakit.sources.behavior",
+]

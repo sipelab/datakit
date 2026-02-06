@@ -30,6 +30,17 @@ if os.getenv("DATAKIT_SAFE_MODE") == "1":
     os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
     os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 
-__all__ = ["logger", "ExperimentData"]
+from .experiment import ExperimentData, ExperimentMetadata  # noqa: E402  (import after logger to avoid circular import)
+from .discover import discover_manifest  # noqa: E402  (import after logger to avoid circular import)
+from .loader import ExperimentStore  # noqa: E402  (import after logger to avoid circular import)
+from .config import settings  # noqa: E402  (import after logger to avoid circular import)
 
-from .experiment import ExperimentData  # noqa: E402  (import after logger to avoid circular import)
+
+__all__ = [
+    "logger",
+    "ExperimentData",
+    "ExperimentMetadata",
+    "discover_manifest",
+    "ExperimentStore",
+    "settings",
+]

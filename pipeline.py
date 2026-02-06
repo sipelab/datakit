@@ -17,29 +17,23 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd
 
 from datakit.config import settings
-#from datakit.discover import DataManifest
 from datakit.experiment import ExperimentData
 from datakit.loader import (
     ExperimentStore,
     build_default_dataset,
-    launch_dataset_shell,
 )
 from datakit.sources.register import DataSource
-from datakit.sources.analysis.pupil import PupilDLCSource
 import numpy as np
 import matplotlib.pyplot as plt
-
-from dataclasses import dataclass
-from typing import Callable
 
 # Display pandas objects more readably while debugging
 pd.set_option("display.max_columns", 60)
 pd.set_option("display.width", 180)
 
-
+#%%
 # ─── Pipeline-Local Source Selection ───────────────────────────────────────────
 PIPELINE_TAGS = (
-    "meso_mean",
+    "mesomap",
     "timestamps",
     "dataqueue",
     "treadmill",
@@ -49,9 +43,11 @@ PIPELINE_TAGS = (
     "meso_metadata",
     "pupil_metadata",
     "pupil_dlc",
+    "psychopy",
+    "suite2p",
 )
 
-PIPELINE_VERSIONS = {"treadmill": "2.0"}
+PIPELINE_VERSIONS = {"treadmill": "3.0", "psychopy": "3.1", "suite2p": "2.1"}
 
 
 
@@ -63,6 +59,14 @@ def slice_inventory(frame: pd.DataFrame, entries: Any = 3) -> pd.DataFrame:
     if isinstance(entries, int):
         return frame.iloc[:entries].copy()
     return frame.loc[list(entries)].copy()
+
+
+"""
+Select a single (Subject, Session, Task) entry from a MultiIndex inventory.
+"""
+def select_inventory_entry(frame: pd.DataFrame, subject: str, session: str, task: str) -> pd.DataFrame:
+    key = (subject, session, task)
+    return frame.loc[[key]].copy()
 
 
 #%%
@@ -87,17 +91,37 @@ print(type(loaded))
 print(loaded)
 
 #%%
+# ─── Load a single datasource from a path and plot its trace ───────────────
+source_tag = "treadmill"
+entry_path = Path(r"D:\jgronemeyer\240324_HFSA\data\sub-STREHAB02\ses-04\beh\20250327_165423_sub-STREHAB02_ses-04_task-widefield_treadmill_data.csv").resolve()
+
+loader = DataSource.create_loader(source_tag, version="2.1")
+trace = loader.load(entry_path).value
+
+time = trace["time_elapsed_s"]
+speed = trace["speed_mm"]
+distance = trace["distance_mm"]
+
+plt.figure(figsize=(10, 4))
+plt.plot(time, distance)
+plt.xlabel("Time (s)")
+plt.title(f"{source_tag} distance")
+plt.ylabel("Distance (mm)")
+plt.tight_layout()
+plt.show()
+
+#%%
 # ─── Build a dataset ───────────────────────────────────────────────────
 
 # Build dataset for F:\251215_ETOH_RO1
-etoH_root = Path(r"F:\251205_ETOH_RO1").resolve()
+etoH_root = Path(r"G:\Projects\ACUTEVIS").resolve()
 etoH_experiment = ExperimentData(etoH_root, include_task_level=True)
-sliced_inventory = slice_inventory(etoH_experiment.data)
-
+sliced_inventory = etoH_experiment.data
+#sliced_inventory = select_inventory_entry(sliced_inventory, subject="ACUTEVIS06", session="ses-02", task="task-movies")
 store = ExperimentStore(sliced_inventory)
 store.register_sources(PIPELINE_TAGS, versions=PIPELINE_VERSIONS)
 
-dataset = store.materialize()
+dataset = store.materialize(progress=True)
 
 #%%
 #%%
@@ -106,6 +130,7 @@ dataset = store.materialize()
 # As opposed to the steps above, the build_default_dataset function
 # handles the entire experiment inventory and dataset building in one step.
 # This saves to an HDF5 file on disk and returns the path to that file.
+etoH_root = Path(r"F:\251215_ETOH_RO1").resolve()
 etoH_dataset_path = build_default_dataset(etoH_root)
 print(f"ETOH dataset stored at: {etoH_dataset_path}")
 
@@ -116,7 +141,7 @@ etoH_loaded.to_pickle(etoH_pickle_path)
 print(f"ETOH dataset pickled to: {etoH_pickle_path}")
 
 # Load pickle into memory; `dataset` variable
-dataset = pd.read_pickle(r"F:\251215_ETOH_RO1\processed\260116_dataset_mvp.pkl")
+dataset = pd.read_pickle(r"F:\251215_ETOH_RO1\processed\260204_dataset_mvp.pkl")
 print("Loaded dataset from pickle with shape", dataset.shape)
 
 
@@ -186,7 +211,7 @@ else:
     print("Merged inventory includes all default sources.")
 
 
-dataset = merged_store.materialize()
-
+dataset = merged_store.materialize(progress=True)
+dataset.to_pickle('260129_HFSA-full.pkl')
 
 # %%

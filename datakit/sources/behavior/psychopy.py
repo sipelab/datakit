@@ -117,7 +117,7 @@ class Psychopy(DataSource):
             exp_start = self._parse_exp_start(exp_start_raw.dropna().iloc[0])
 
         # 5) Apply dataqueue offset and align times.
-        dq_start, dq_meta = self._dataqueue_offset(path.parent)
+        dq_start, dq_meta = self._dataqueue_offset(path.parent, task)
         aligned_t = self._align_time(row_time, key_rt, dq_start)
         aligned_table = self._align_table(trial_table, key_rt, dq_start)
 
@@ -156,13 +156,7 @@ class Psychopy(DataSource):
         return LoadedStream(tag=self.tag, t=aligned_t, value=payload, meta=metrics)
 
     def _parse_exp_start(self, value: Any) -> Optional[pd.Timestamp]:
-        if value is None:
-            return None
-        if isinstance(value, float) and np.isnan(value):
-            return None
         text = str(value).strip()
-        if not text:
-            return None
         text = text.replace("h", ":", 1)
         text = re.sub(r":(\d{2})\.(\d{2}\.\d+)", r":\1:\2", text)
         parsed = pd.to_datetime(text, errors="coerce", utc=True)
@@ -221,35 +215,32 @@ class Psychopy(DataSource):
                 return filled.to_numpy(dtype=np.float64), col, meta
         raise ValueError("Psychopy requires a display_*.started column with at least 2 numeric values.")
 
-    def _dataqueue_offset(self, directory: Path) -> tuple[Optional[float], dict]:
-        timeline = GlobalTimeline.for_directory(directory)
-        if timeline is None:
-            return None, {}
-        frame = timeline.dataframe()
-        if frame.empty:
-            return None, {"dataqueue_file": str(timeline.source_path)}
-        queue = pd.to_numeric(frame.get(self.dataqueue_elapsed_column), errors="coerce")
-        if queue.isna().all():
-            return None, {"dataqueue_file": str(timeline.source_path)}
+    def _dataqueue_offset(self, directory: Path, task: Optional[str]) -> tuple[Optional[float], dict]:
+        #TODO: If a dataqueue does not have nidaq payload==1 but may start at nidaq==2,
+        # treat the first pulse as the start and log a warning. 
+        candidates = sorted(directory.glob(f"*{task}*_dataqueue.csv"))
+        dq_path = candidates[0]
+        frame = GlobalTimeline._load_dataqueue(dq_path)
+        timeline = GlobalTimeline(directory.resolve(), dq_path, frame)
+        queue_all = timeline.queue_series()
 
-        queue_start = float(queue.dropna().iloc[0])
-        mask = pd.Series(True, index=frame.index)
-        if self.dataqueue_device_column in frame.columns:
-            mask &= frame[self.dataqueue_device_column].astype(str).str.contains(
-                self.dataqueue_device_match, case=False, na=False
-            )
-        if self.dataqueue_payload_column in frame.columns:
-            mask &= pd.to_numeric(frame[self.dataqueue_payload_column], errors="coerce") == self.dataqueue_payload_value
-
-        pulses = queue.loc[mask].dropna()
+        queue_start = float(queue_all.iloc[0])
+        device_slice = timeline.slice(self.dataqueue_device_match)
+        abs_start = device_slice.packet_absolute().to_numpy(dtype=str)
+        pulses = pd.to_numeric(device_slice.rows.get(self.dataqueue_elapsed_column), errors="coerce")
+        # if self.dataqueue_payload_column in device_slice.rows.columns:
+        #     payload = pd.to_numeric(device_slice.rows[self.dataqueue_payload_column], errors="coerce")
+        #     pulses = pulses.loc[payload == self.dataqueue_payload_value]
+        pulses = pulses.dropna()
         if pulses.empty:
-            raise ValueError("Dataqueue timeline exists but contains no nidaq payload==1 pulses.")
+            raise ValueError(f"Dataqueue timeline exists {timeline.source_path} but contains no nidaq payload==1 pulses.")
 
-        start_rel = float(pulses.iloc[0]) - queue_start
+        start_rel = float(pulses.iloc[0]) - 0
         meta = {
             "dataqueue_file": str(timeline.source_path),
             "dataqueue_pulses": int(pulses.size),
             "dataqueue_queue_start": queue_start,
+            "abs_start_time": abs_start[0],
             "dataqueue_start": start_rel,
             "dataqueue_end": None,
         }

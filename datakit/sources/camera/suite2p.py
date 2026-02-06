@@ -32,7 +32,6 @@ except Exception:  # pragma: no cover - graceful degradation when scipy missing
     CubicSpline = None
     find_peaks = None
 
-
 class Suite2p(DataSource):
     """Load Suite2p plane outputs (F, Fneu, spks, stat, ops, iscell).
 

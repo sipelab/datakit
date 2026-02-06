@@ -307,11 +307,12 @@ class ExperimentStore:
             df = pd.concat([df, meta_table], axis=1)
             df.columns.set_names(["Source", "Feature"], inplace=True)
         self._materialized = df
-        df.attrs["meta_frame"] = self.meta_frame
-        df.attrs["session_attrs"] = dict(self.session_attrs)
-        df.attrs["experiment_attrs"] = dict(self.experiment_attrs)
-        df.attrs["time_basis"] = dict(self.time_basis)
-        df.attrs["meta_columns"] = list(self._meta_columns())
+        # df.attrs["meta_frame"] = self.meta_frame.to_dict(orient="records")
+        # df.attrs["meta_frame_columns"] = list(self.meta_frame.columns)
+        # df.attrs["session_attrs"] = dict(self.session_attrs)
+        # df.attrs["experiment_attrs"] = dict(self.experiment_attrs)
+        # df.attrs["time_basis"] = dict(self.time_basis)
+        # df.attrs["meta_columns"] = list(self._meta_columns())
         return df
 
     # ------------------------------------------------------------------
