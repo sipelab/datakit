@@ -225,7 +225,16 @@ class ExperimentStore:
     ) -> tuple[dict, Dict[str, Any] | None]:
         if pd.isna(path):
             return {}, None
-        data = spec.loader(path)
+        try:
+            data = spec.loader(path)
+        except Exception as exc:
+            subject, session, task = idx
+            context = (
+                f"Error loading source '{spec.name}' for "
+                f"({subject}, {session}, {task}) at '{path}'. "
+                f"Cause: {exc!r}"
+            )
+            raise RuntimeError(context) from exc
         if isinstance(data, LoadedStream):
             payload = data.value
             if isinstance(payload, pd.DataFrame):
@@ -264,7 +273,13 @@ class ExperimentStore:
         bar = None
         if progress:
             from tqdm import tqdm
-            bar = tqdm(total=total_loads, desc="materialize", unit="load")
+
+            bar = tqdm(
+                total=total_loads,
+                desc="materialize",
+                unit="load",
+                miniters=1,
+            )
         for spec in self._specs:
             if bar is not None:
                 bar.set_description(f"materialize:{spec.name}")
@@ -367,8 +382,6 @@ class ExperimentStore:
         missing = [col for col in index_cols + [source_col, key_col, value_col] if col not in meta.columns]
         if missing:
             return pd.DataFrame(index=self.inventory.index)
-<<<<<<< HEAD
-=======
         pivot = meta.pivot_table(
             index=index_cols,
             columns=[source_col, key_col],
@@ -381,7 +394,6 @@ class ExperimentStore:
                 [(str(source), f"meta.{key}") for source, key in pivot.columns],
                 names=["Source", "Feature"],
             )
->>>>>>> 65283e4cc7aebbc6496dc2b5e7e83ca05ba44aa5
         grouped = (
             meta.groupby(index_cols + [source_col], dropna=False)[[key_col, value_col]]
             .apply(lambda group: {row[key_col]: row[value_col] for _, row in group.iterrows()})
@@ -393,15 +405,9 @@ class ExperimentStore:
                 [(str(source), "meta") for source in meta_dict.columns],
                 names=["Source", "Feature"],
             )
-<<<<<<< HEAD
-        if meta_dict.empty:
-            return pd.DataFrame(index=self.inventory.index)
-        return meta_dict
-=======
         if pivot.empty and meta_dict.empty:
             return pd.DataFrame(index=self.inventory.index)
         return pd.concat([frame for frame in (pivot, meta_dict) if not frame.empty], axis=1)
->>>>>>> 65283e4cc7aebbc6496dc2b5e7e83ca05ba44aa5
 
     # ------------------------------------------------------------------
     # Persistence helpers
