@@ -367,6 +367,21 @@ class ExperimentStore:
         missing = [col for col in index_cols + [source_col, key_col, value_col] if col not in meta.columns]
         if missing:
             return pd.DataFrame(index=self.inventory.index)
+<<<<<<< HEAD
+=======
+        pivot = meta.pivot_table(
+            index=index_cols,
+            columns=[source_col, key_col],
+            values=value_col,
+            aggfunc="first",
+        )
+        pivot = pivot.reindex(self.inventory.index)
+        if not pivot.empty:
+            pivot.columns = pd.MultiIndex.from_tuples(
+                [(str(source), f"meta.{key}") for source, key in pivot.columns],
+                names=["Source", "Feature"],
+            )
+>>>>>>> 65283e4cc7aebbc6496dc2b5e7e83ca05ba44aa5
         grouped = (
             meta.groupby(index_cols + [source_col], dropna=False)[[key_col, value_col]]
             .apply(lambda group: {row[key_col]: row[value_col] for _, row in group.iterrows()})
@@ -378,9 +393,15 @@ class ExperimentStore:
                 [(str(source), "meta") for source in meta_dict.columns],
                 names=["Source", "Feature"],
             )
+<<<<<<< HEAD
         if meta_dict.empty:
             return pd.DataFrame(index=self.inventory.index)
         return meta_dict
+=======
+        if pivot.empty and meta_dict.empty:
+            return pd.DataFrame(index=self.inventory.index)
+        return pd.concat([frame for frame in (pivot, meta_dict) if not frame.empty], axis=1)
+>>>>>>> 65283e4cc7aebbc6496dc2b5e7e83ca05ba44aa5
 
     # ------------------------------------------------------------------
     # Persistence helpers
