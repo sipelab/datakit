@@ -1,6 +1,9 @@
 """Psychopy behavioral event data source.
 
-Alignment:
+Explicit assumptions:
+- Psychopy CSV contains at least one display_*.started column with 2+ numeric rows.
+- A single keypress RT column exists (key_resp*.rt) and is used to align time zero.
+- If a dataqueue timeline exists, it must include nidaq payload==1 pulses.
 
 psychopy files have an expStart column that indicates start of the experiment in absolute clock datetime.
 Psychopy files have a Custom_Trigger routine; a spacebar press then triggers a sync pulse to the DAQ system.
@@ -44,302 +47,27 @@ _TASK_ALIASES = {
 _TIME_SUFFIXES = (".started", ".stopped", ".rt", ".t")
 
 
-def _parse_exp_start(value: Any) -> Optional[pd.Timestamp]:
-    if value is None:
-        return None
-    if isinstance(value, float) and np.isnan(value):
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    text = text.replace("h", ":", 1)
-    text = re.sub(r":(\d{2})\.(\d{2}\.\d+)", r":\1:\2", text)
-    parsed = pd.to_datetime(text, errors="coerce", utc=True)
-    if pd.isna(parsed):
-        return None
-    return parsed
+class Psychopy(DataSource):
+    """Load the raw Psychopy CSV with task-specific trial metadata."""
 
-def _infer_task(path: Path) -> str | None:
-    """Infer a known task label from the file path."""
-    name = path.as_posix().lower()
-    match = _TASK_PATTERN.search(name)
-    if match:
-        return _TASK_ALIASES.get(match.group(1).lower())
-    for key, label in _TASK_ALIASES.items():
-        if key in name:
-            return label
-    return None
-
-
-def _prefix_columns(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
-    """Add a task-specific prefix to every column name."""
-    renamed = {col: f"{prefix}_{col}" for col in df.columns}
-    return df.rename(columns=renamed)
-
-
-def _select_columns(raw: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-    """Return only the available columns, or an empty frame if none are present."""
-    available = [col for col in columns if col in raw.columns]
-    if not available:
-        return pd.DataFrame(index=raw.index)
-    return raw.loc[:, available].copy()
-
-
-def _resolve_keypress_rt(raw: pd.DataFrame) -> tuple[Optional[float], Optional[str]]:
-    candidates = [col for col in raw.columns if re.match(r"key_resp.*\.rt$", str(col))]
-    for col in candidates:
-        series = pd.to_numeric(raw[col], errors="coerce")
-        if series.notna().any():
-            return float(series.dropna().iloc[0]), str(col)
-    return None, None
-
-
-def _resolve_row_time(raw: pd.DataFrame) -> tuple[np.ndarray, str, dict]:
-    """Extract timeline from event start times, preferring display_*.started columns."""
-    # Try display event columns first
-    display_candidates = [c for c in raw.columns if c.startswith('display_') and c.endswith('.started')]
-    for col in display_candidates:
-        series = pd.to_numeric(raw[col], errors="coerce")
-        if series.notna().sum() >= 2:
-            filled = series.interpolate(limit_direction="both")
-            
-            # Extend timeline to capture final .stopped events
-            time_cols = [c for c in raw.columns if any(c.endswith(suf) for suf in _TIME_SUFFIXES)]
-            max_times = [pd.to_numeric(raw[c], errors="coerce").max() for c in time_cols]
-            max_time = max([t for t in max_times if pd.notna(t)], default=filled.max())
-            
-            # If there are events after the last filled time, extend with the max time
-            if max_time > filled.max():
-                last_valid_idx = filled.last_valid_index()
-                if last_valid_idx is not None and last_valid_idx < len(filled) - 1:
-                    # Extend all remaining NaN values with max_time
-                    filled.loc[last_valid_idx + 1:] = max_time
-            
-            meta = {
-                "row_time_column": col,
-                "row_time_missing": int(series.isna().sum()),
-                "row_time_extended_to": float(max_time),
-            }
-            return filled.to_numpy(dtype=np.float64), col, meta
-
-    # Fallback to 15Hz estimate
-    fallback = np.arange(len(raw), dtype=np.float64) / 15.0215
-    meta = {
-        "row_time_column": "fallback_15hz",
-        "row_time_missing": int(len(raw)),
-    }
-    return fallback, "fallback_15hz", meta
-
-
-def _dataqueue_pulse_window(directory: Path) -> tuple[Optional[float], Optional[float], dict]:
-    timeline = GlobalTimeline.for_directory(directory)
-    if timeline is None:
-        return None, None, {}
-
-    frame = timeline.dataframe()
-    if frame.empty:
-        return None, None, {"dataqueue_file": str(timeline.source_path)}
-
-    queue_col = "queue_elapsed"
-    queue = pd.to_numeric(frame.get(queue_col), errors="coerce")
-    if queue.isna().all():
-        return None, None, {"dataqueue_file": str(timeline.source_path)}
-
-    queue_start = float(queue.dropna().iloc[0])
-
-    mask = pd.Series(True, index=frame.index)
-    if "device_id" in frame.columns:
-        mask &= frame["device_id"].astype(str).str.contains("nidaq", case=False, na=False)
-    if "payload" in frame.columns:
-        mask &= pd.to_numeric(frame["payload"], errors="coerce") == 1
-
-    pulses = queue.loc[mask].dropna()
-    if pulses.empty:
-        pulses = queue.dropna()
-
-    if pulses.empty:
-        return None, None, {"dataqueue_file": str(timeline.source_path)}
-
-    start = float(pulses.iloc[0])
-    end = float(pulses.iloc[-1])
-    start_rel = start - queue_start
-    end_rel = end - queue_start
-    meta = {
-        "dataqueue_file": str(timeline.source_path),
-        "dataqueue_pulses": int(pulses.size),
-        "dataqueue_queue_start": queue_start,
-        "dataqueue_start": start_rel,
-        "dataqueue_end": end_rel,
-    }
-    return start_rel, end_rel, meta
-
-
-def _align_time_values(values: np.ndarray, key_rt: Optional[float], offset: Optional[float]) -> np.ndarray:
-    aligned = values.astype(np.float64, copy=True)
-    if key_rt is not None:
-        aligned = aligned - float(key_rt)
-    if offset is not None:
-        aligned = aligned - float(offset)
-    return aligned
-
-
-def _align_trial_times(
-    frame: pd.DataFrame,
-    *,
-    key_rt: Optional[float],
-    offset: Optional[float],
-) -> tuple[pd.DataFrame, list[str]]:
-    aligned = frame.copy()
-    aligned_cols: list[str] = []
-    for col in aligned.columns:
-        name = str(col)
-        if not (name.lower().endswith(_TIME_SUFFIXES) or name.startswith("window_")):
-            continue
-        series = pd.to_numeric(aligned[col], errors="coerce")
-        if series.notna().any():
-            aligned[col] = _align_time_values(series.to_numpy(dtype=np.float64), key_rt, offset)
-            aligned_cols.append(name)
-    return aligned, aligned_cols
-
-
-def _build_window_list(frame: pd.DataFrame, start_col: str, stop_col: str) -> list[tuple[float, float]]:
-    if start_col not in frame.columns or stop_col not in frame.columns:
-        return []
-    starts = pd.to_numeric(frame[start_col], errors="coerce").to_numpy(dtype=np.float64, copy=False)
-    stops = pd.to_numeric(frame[stop_col], errors="coerce").to_numpy(dtype=np.float64, copy=False)
-    windows = [
-        (float(start), float(stop))
-        for start, stop in zip(starts, stops)
-        if np.isfinite(start) and np.isfinite(stop) and stop > start
-    ]
-    return windows
-
-
-def _extract_gratings_trials(raw: pd.DataFrame) -> pd.DataFrame:
-    """Return a task-gratings trial metadata table.
-
-    Uses display_gratings.started as the trial time, not thisRow.t.
-    """
-    columns: list[str] = [
+    tag = "psychopy"
+    patterns = ("**/*_psychopy.csv",)
+    version = "3.1"
+    task_pattern = _TASK_PATTERN
+    task_aliases = _TASK_ALIASES
+    time_suffixes = _TIME_SUFFIXES
+    keypress_rt_pattern = re.compile(r"key_resp.*\.rt$")
+    time_source_prefix = "display_"
+    time_source_suffix = ".started"
+    gratings_columns = (
         "trials.thisN",
-        "display_gratings.started",
-        "display_gratings.stopped",
         "stim_grayScreen.started",
         "stim_grayScreen.stopped",
         "stim_grating.started",
         "stim_grating.stopped",
-    ]
-    selected = _select_columns(raw, columns)
-    
-    # Keep only rows with valid trial numbers
-    has_trial = selected.get('trials.thisN', pd.Series(dtype=float)).notna()
-    result = selected[has_trial].copy()
-
-    grating_windows: list[tuple[float, float]] = []
-    gray_windows: list[tuple[float, float]] = []
-
-    if not result.empty:
-        start_candidates = [
-            col for col in ["stim_grating.started", "display_gratings.started"] if col in result.columns
-        ]
-        stop_candidates = [
-            col
-            for col in [
-                "stim_grating.stopped",
-                "display_gratings.stopped",
-            ]
-            if col in result.columns
-        ]
-
-        if start_candidates:
-            start_frame = result.loc[:, start_candidates]
-            grating_start = start_frame.bfill(axis=1).iloc[:, 0]
-        else:
-            grating_start = pd.Series(np.nan, index=result.index)
-
-        if stop_candidates:
-            stop_frame = result.loc[:, stop_candidates]
-            grating_stop = stop_frame.bfill(axis=1).iloc[:, 0]
-        else:
-            grating_stop = pd.Series(np.nan, index=result.index)
-
-        gray_start = result.get("stim_grayScreen.started", pd.Series(np.nan, index=result.index))
-
-        if start_candidates:
-            next_grating = grating_start.shift(-1)
-        else:
-            next_grating = pd.Series(np.nan, index=result.index)
-        gray_stop_fallback = result.get("display_gratings.stopped", pd.Series(np.nan, index=result.index))
-        gray_stop = next_grating.where(next_grating.notna(), gray_stop_fallback)
-
-        result["window_grating_start"] = pd.to_numeric(grating_start, errors="coerce")
-        result["window_grating_stop"] = pd.to_numeric(grating_stop, errors="coerce")
-        result["window_gray_start"] = pd.to_numeric(gray_start, errors="coerce")
-        result["window_gray_stop"] = pd.to_numeric(gray_stop, errors="coerce")
-
-        grating_windows = list(
-            zip(
-                result["window_grating_start"].to_numpy(dtype=np.float64, copy=False),
-                result["window_grating_stop"].to_numpy(dtype=np.float64, copy=False),
-            )
-        )
-        grating_windows = [
-            (float(start), float(stop))
-            for start, stop in grating_windows
-            if np.isfinite(start) and np.isfinite(stop) and stop > start
-        ]
-
-        gray_windows = list(
-            zip(
-                result["window_gray_start"].to_numpy(dtype=np.float64, copy=False),
-                result["window_gray_stop"].to_numpy(dtype=np.float64, copy=False),
-            )
-        )
-        gray_windows = [
-            (float(start), float(stop))
-            for start, stop in gray_windows
-            if np.isfinite(start) and np.isfinite(stop) and stop > start
-        ]
-
-        result["gratings_windows"] = [grating_windows] * len(result)
-        result["gray_windows"] = [gray_windows] * len(result)
-    
-    # Add a final row to capture the end of the last stopped event
-    if len(result) > 0 and 'display_gratings.started' in result.columns:
-        trial_start = pd.to_numeric(result['display_gratings.started'], errors='coerce')
-        stopped_cols = [c for c in columns if c.endswith('.stopped')]
-        
-        # Find max time across all stopped columns
-        max_time = trial_start.max()
-        for col in stopped_cols:
-            if col in result.columns:
-                col_vals = pd.to_numeric(result[col], errors='coerce')
-                col_max = col_vals.max()
-                if pd.notna(col_max) and col_max > max_time:
-                    max_time = col_max
-        
-        # If the last stopped event is after the last trial start, append a row
-        last_start = trial_start.iloc[-1]
-        if pd.notna(max_time) and max_time > last_start:
-            # Create a final row with just the time extension
-            final_row: dict[str, object] = {col: np.nan for col in result.columns}
-            final_row["display_gratings.started"] = max_time
-            final_row["window_grating_start"] = max_time
-            if "gratings_windows" in result.columns:
-                final_row["gratings_windows"] = grating_windows
-            if "gray_windows" in result.columns:
-                final_row["gray_windows"] = gray_windows
-            result = pd.concat([result, pd.DataFrame([final_row])], ignore_index=True)
-    
-    return result
-
-
-def _extract_movies_trials(raw: pd.DataFrame) -> pd.DataFrame:
-    """Return a task-movies trial metadata table.
-
-    TODO: replace the column list with the true Psychopy fields you care about.
-    """
-    columns: list[str] = [
+        "display_gratings.stopped",
+    )
+    movies_columns = (
         "trials_2.thisN",
         "trials_2.thisIndex",
         "trials2.thisN",
@@ -351,111 +79,228 @@ def _extract_movies_trials(raw: pd.DataFrame) -> pd.DataFrame:
         "display_mov.stopped",
         "grey.started",
         "grey.stopped",
-    ]
-    return _select_columns(raw, columns)
-
-
-class Psychopy(DataSource):
-    """Load the raw Psychopy CSV with task-specific trial metadata."""
-
-    tag = "psychopy"
-    patterns = ("**/*_psychopy.csv",)
-    version = "3.0"
-
+    )
+    dataqueue_elapsed_column = "queue_elapsed"
+    dataqueue_device_column = "device_id"
+    dataqueue_device_match = "nidaq"
+    dataqueue_payload_column = "payload"
+    dataqueue_payload_value = 1
+    
+    
     def load(self, path: Path) -> LoadedStream:
-        # 1) Read the raw CSV.
+        # 1) Read raw psychopy CSV.
         raw = pd.read_csv(path, low_memory=False)
-        # 2) Infer task and extract a task-specific metadata table.
-        task = _infer_task(path)
-        extractors = {
-            "task-gratings": ("gratings", _extract_gratings_trials),
-            "task-movies": ("movies", _extract_movies_trials),
-        }
-        extractor = extractors.get(task or "")
-        if extractor is None:
+
+        # 2) Infer task and choose trial table.
+        task = self._infer_task(path)
+        if task == "task-gratings":
+            trial_table = self._extract_gratings(raw)
+            task_branch = "gratings"
+        elif task == "task-movies":
+            trial_table = self._extract_movies(raw)
+            task_branch = "movies"
+        else:
             trial_table = raw
             task_branch = "raw"
-        else:
-            prefix, func = extractor
-            trial_table = func(raw)
-            task_branch = prefix
 
-        # 3) Build a row-level timeline using event start times.
-        # Use trial_table if it has display_*.started, otherwise use raw
-        time_source = trial_table if any(c.startswith('display_') and c.endswith('.started') 
-                                        for c in trial_table.columns) else raw
-        row_time, row_col, row_meta = _resolve_row_time(time_source)
-        key_rt, key_col = _resolve_keypress_rt(raw)
+        # 3) Resolve timeline and keypress offset.
+        time_source = trial_table if any(
+            c.startswith(self.time_source_prefix) and c.endswith(self.time_source_suffix) for c in trial_table.columns
+        ) else raw
+        row_time, row_col, row_meta = self._resolve_row_time(time_source)
+        key_rt, key_col = self._resolve_keypress_rt(raw)
 
-        exp_start_raw = raw.get("expStart")
+        # 4) Parse experiment start time (optional).
         exp_start = None
-        if exp_start_raw is not None:
-            exp_start = _parse_exp_start(exp_start_raw.dropna().iloc[0]) if exp_start_raw.dropna().any() else None
+        exp_start_raw = raw.get("expStart")
+        if exp_start_raw is not None and exp_start_raw.dropna().any():
+            exp_start = self._parse_exp_start(exp_start_raw.dropna().iloc[0])
 
-        dq_start, dq_end, dq_meta = _dataqueue_pulse_window(path.parent)
-        offset_s = dq_start if dq_start is not None else None
-        aligned_t = _align_time_values(row_time, key_rt, offset_s)
+        # 5) Apply dataqueue offset and align times.
+        dq_start, dq_meta = self._dataqueue_offset(path.parent)
+        aligned_t = self._align_time(row_time, key_rt, dq_start)
+        aligned_table = self._align_table(trial_table, key_rt, dq_start)
 
-        # 4) Align all time-like columns in the trial table (no offset, start from 0).
-        aligned_table, aligned_cols = _align_trial_times(
-            trial_table,
-            key_rt=key_rt,
-            offset=offset_s,
-        )
-
-        # 5) Trim to nidaq window when available (convert to zero-based window).
-        trim_mask = np.isfinite(aligned_t)
-        if dq_start is not None and dq_end is not None:
-            window_duration = dq_end - dq_start
-            trim_mask &= (aligned_t >= 0) & (aligned_t <= window_duration)
-
-        trimmed_rows = int(trim_mask.sum())
-        if 0 < trimmed_rows < len(aligned_t):
-            aligned_t = aligned_t[trim_mask]
-            aligned_table = aligned_table.loc[trim_mask].reset_index(drop=True)
-
+        # 6) For gratings, build windows once from the aligned table.
         if task_branch == "gratings":
-            gratings_windows = _build_window_list(
-                aligned_table,
-                "window_grating_start",
-                "window_grating_stop",
-            )
-            gray_windows = _build_window_list(
-                aligned_table,
-                "window_gray_start",
-                "window_gray_stop",
-            )
             if "window_grating_start" in aligned_table.columns:
-                aligned_table["gratings_windows"] = [gratings_windows] * len(aligned_table)
+                aligned_table["gratings_windows"] = [
+                    self._build_window_list(aligned_table, "window_grating_start", "window_grating_stop")
+                ] * len(aligned_table)
             if "window_gray_start" in aligned_table.columns:
-                aligned_table["gray_windows"] = [gray_windows] * len(aligned_table)
+                aligned_table["gray_windows"] = [
+                    self._build_window_list(aligned_table, "window_gray_start", "window_gray_stop")
+                ] * len(aligned_table)
 
-        payload = StreamPayload.table(_prefix_columns(aligned_table, task_branch))
-
-        # 6) Persist useful diagnostics for downstream inspection.
+        # 7) Package payload and metrics.
+        payload = StreamPayload.table(
+            aligned_table.rename(columns={c: f"{task_branch}_{c}" for c in aligned_table.columns})
+        )
         metrics = {
             "source_file": str(path),
             "n_rows": int(len(raw)),
-            "columns": tuple(str(col) for col in raw.columns),
             "task_inferred": task,
             "task_branch": task_branch,
             "row_time_column": row_col,
             "key_resp_rt": key_rt,
             "key_resp_column": key_col,
-            "aligned_columns": tuple(aligned_cols),
-            "trimmed_rows": int(trimmed_rows),
+            "trimmed_rows": int(len(aligned_t)),
             "exp_start": exp_start.isoformat() if exp_start is not None else None,
-            "start_offset_s": offset_s,
+            "start_offset_s": dq_start,
         }
         metrics.update(row_meta)
         metrics.update(dq_meta)
-
-        if dq_start is not None:
-            metrics["time_basis"] = "psychopy_zero_based"
-            metrics["alignment_method"] = "keypress_relative"
-        else:
-            metrics["time_basis"] = "psychopy_native"
+        metrics["time_basis"] = "psychopy_zero_based" if dq_start is not None else "psychopy_native"
+        metrics["alignment_method"] = "keypress_relative"
 
         return LoadedStream(tag=self.tag, t=aligned_t, value=payload, meta=metrics)
-    
 
+    def _parse_exp_start(self, value: Any) -> Optional[pd.Timestamp]:
+        if value is None:
+            return None
+        if isinstance(value, float) and np.isnan(value):
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        text = text.replace("h", ":", 1)
+        text = re.sub(r":(\d{2})\.(\d{2}\.\d+)", r":\1:\2", text)
+        parsed = pd.to_datetime(text, errors="coerce", utc=True)
+        return None if pd.isna(parsed) else parsed
+
+    def _infer_task(self, file_path: Path) -> str | None:
+        name = file_path.as_posix().lower()
+        match = self.task_pattern.search(name)
+        if match:
+            return self.task_aliases.get(match.group(1).lower())
+        for key, label in self.task_aliases.items():
+            if key in name:
+                return label
+        return None
+
+    def _select_columns(self, frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+        available = [col for col in columns if col in frame.columns]
+        if not available:
+            raise ValueError("Psychopy required columns are missing from the CSV.")
+        return frame.loc[:, available].copy()
+
+    def _coalesce_column(self, frame: pd.DataFrame, columns: list[str]) -> pd.Series:
+        available = [col for col in columns if col in frame.columns]
+        if not available:
+            raise ValueError(f"Psychopy required columns missing: {columns}")
+        return frame.loc[:, available].bfill(axis=1).iloc[:, 0]
+
+    def _resolve_keypress_rt(self, frame: pd.DataFrame) -> tuple[float, str]:
+        candidates = [col for col in frame.columns if self.keypress_rt_pattern.match(str(col))]
+        for col in candidates:
+            series = pd.to_numeric(frame[col], errors="coerce")
+            if series.notna().any():
+                return float(series.dropna().iloc[0]), str(col)
+        raise ValueError("Psychopy keypress RT column not found (key_resp*.rt).")
+
+    def _resolve_row_time(self, frame: pd.DataFrame) -> tuple[np.ndarray, str, dict]:
+        display_candidates = [
+            c for c in frame.columns if c.startswith(self.time_source_prefix) and c.endswith(self.time_source_suffix)
+        ]
+        for col in display_candidates:
+            series = pd.to_numeric(frame[col], errors="coerce")
+            if series.notna().sum() >= 2:
+                filled = series.interpolate(limit_direction="both")
+                time_cols = [c for c in frame.columns if any(c.endswith(suf) for suf in self.time_suffixes)]
+                max_times = [pd.to_numeric(frame[c], errors="coerce").max() for c in time_cols]
+                max_time = max([t for t in max_times if pd.notna(t)], default=filled.max())
+                if max_time > filled.max():
+                    last_valid_idx = filled.last_valid_index()
+                    if last_valid_idx is not None and last_valid_idx < len(filled) - 1:
+                        filled.loc[last_valid_idx + 1:] = max_time
+                meta = {
+                    "row_time_column": col,
+                    "row_time_missing": int(series.isna().sum()),
+                    "row_time_extended_to": float(max_time),
+                }
+                return filled.to_numpy(dtype=np.float64), col, meta
+        raise ValueError("Psychopy requires a display_*.started column with at least 2 numeric values.")
+
+    def _dataqueue_offset(self, directory: Path) -> tuple[Optional[float], dict]:
+        timeline = GlobalTimeline.for_directory(directory)
+        if timeline is None:
+            return None, {}
+        frame = timeline.dataframe()
+        if frame.empty:
+            return None, {"dataqueue_file": str(timeline.source_path)}
+        queue = pd.to_numeric(frame.get(self.dataqueue_elapsed_column), errors="coerce")
+        if queue.isna().all():
+            return None, {"dataqueue_file": str(timeline.source_path)}
+
+        queue_start = float(queue.dropna().iloc[0])
+        mask = pd.Series(True, index=frame.index)
+        if self.dataqueue_device_column in frame.columns:
+            mask &= frame[self.dataqueue_device_column].astype(str).str.contains(
+                self.dataqueue_device_match, case=False, na=False
+            )
+        if self.dataqueue_payload_column in frame.columns:
+            mask &= pd.to_numeric(frame[self.dataqueue_payload_column], errors="coerce") == self.dataqueue_payload_value
+
+        pulses = queue.loc[mask].dropna()
+        if pulses.empty:
+            raise ValueError("Dataqueue timeline exists but contains no nidaq payload==1 pulses.")
+
+        start_rel = float(pulses.iloc[0]) - queue_start
+        meta = {
+            "dataqueue_file": str(timeline.source_path),
+            "dataqueue_pulses": int(pulses.size),
+            "dataqueue_queue_start": queue_start,
+            "dataqueue_start": start_rel,
+            "dataqueue_end": None,
+        }
+        return start_rel, meta
+
+    def _align_time(self, values: np.ndarray, key_rt: float, offset: Optional[float]) -> np.ndarray:
+        aligned = values.astype(np.float64, copy=True) - float(key_rt)
+        if offset is not None:
+            aligned = aligned - float(offset)
+        return aligned
+
+    def _align_table(self, frame: pd.DataFrame, key_rt: float, offset: Optional[float]) -> pd.DataFrame:
+        aligned = frame.copy()
+        for col in aligned.columns:
+            name = str(col)
+            if not (name.lower().endswith(self.time_suffixes) or name.startswith("window_")):
+                continue
+            series = pd.to_numeric(aligned[col], errors="coerce")
+            aligned[col] = self._align_time(series.to_numpy(dtype=np.float64), key_rt, offset)
+        return aligned.dropna(axis=1, how="all")
+
+    def _build_window_list(self, frame: pd.DataFrame, start_col: str, stop_col: str) -> list[tuple[float, float]]:
+        if start_col not in frame.columns or stop_col not in frame.columns:
+            return []
+        starts = pd.to_numeric(frame[start_col], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        stops = pd.to_numeric(frame[stop_col], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+        return [
+            (float(start), float(stop))
+            for start, stop in zip(starts, stops)
+            if np.isfinite(start) and np.isfinite(stop) and stop > start
+        ]
+
+    def _extract_gratings(self, frame: pd.DataFrame) -> pd.DataFrame:
+        selected = self._select_columns(frame, list(self.gratings_columns))
+        result = selected.loc[selected.get("trials.thisN").notna()].copy()
+        if result.empty:
+            raise ValueError("Psychopy gratings trials are empty.")
+
+        gray_start = self._coalesce_column(result, ["stim_grayScreen.started"])
+        gray_stop = self._coalesce_column(result, ["stim_grating.started"])
+        grating_start = self._coalesce_column(result, ["stim_grating.started"])
+        grating_stop = self._coalesce_column(result, ["display_gratings.stopped"])
+
+        result["window_grating_start"] = pd.to_numeric(grating_start, errors="coerce")
+        result["window_grating_stop"] = pd.to_numeric(grating_stop, errors="coerce")
+        result["window_gray_start"] = pd.to_numeric(gray_start, errors="coerce")
+        result["window_gray_stop"] = pd.to_numeric(gray_stop, errors="coerce")
+
+        return result
+
+    def _extract_movies(self, frame: pd.DataFrame) -> pd.DataFrame:
+        return self._select_columns(frame, list(self.movies_columns))
+
+    
