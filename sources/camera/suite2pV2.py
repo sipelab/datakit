@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy import interpolate
 
 from datakit.sources.register import DataSource
 from datakit import logger
@@ -20,7 +19,7 @@ class Suite2pV2(DataSource):
 
     tag = "suite2p"
     patterns = ("**/*_suite2p/**/F.npy",)
-    version = "2.0"
+    version = "2.1"
 
     required_files: Tuple[str, ...] = ("Fneu.npy", "iscell.npy")
     optional_files: Tuple[str, ...] = ("ops.npy", "stat.npy")
@@ -44,13 +43,19 @@ class Suite2pV2(DataSource):
         ("toolkit", "time_elapsed_s"): "time_elapsed_s",
     }
 
+    '''
+    TARGET_RATE_HZ is only used for resampling to a uniform grid for downstream processed/analysis outputs (interpolated ΔF/F
+    ΔF/F, smoothing, peak finding). The nidaq timeline remains the native time base in toolkit.time_native_s, 
+    but processed signals are interpolated to TARGET_RATE_HZ for consistent spacing across sessions and analyses. 
+    and the interpolation block. If you want to keep everything at native timing, set TARGET_RATE_HZ <= 0 
+    so it uses native spacing without resampling 
+    '''
     NEUROPIL_SCALE = 0.3
     BASELINE_PERCENTILE = 3.0
     TARGET_RATE_HZ = 15.0
     SMOOTHING_KERNEL = 3
     PEAK_PROMINENCE = 0.3
     MIN_TIMELINE_POINTS = 2
-    MIN_SPLINE_POINTS = 4
     MIN_INTERPOLATED_SAMPLES = 2
 
     def load(self, path: Path) -> LoadedStream:
@@ -58,11 +63,11 @@ class Suite2pV2(DataSource):
         session_dir = self._find_session_dir(plane_dir)
 
         f_traces = self._ensure_float32(self._load_array(path))
-        ancillary, optional_missing = self._load_companions(plane_dir, f_traces.shape)
+        ancillary, optional_missing = self._load_companions(plane_dir)
 
         n_cells, n_frames = f_traces.shape
 
-        timeline, timing_meta = self._simple_timeline(session_dir, n_frames)
+        timeline, timing_meta = self._nidaq_timeline(session_dir, n_frames)
 
         cell_mask = ancillary["iscell"][:, 0].astype(bool)
         accepted_cells = int(cell_mask.sum())
@@ -120,16 +125,17 @@ class Suite2pV2(DataSource):
     ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
         timeline = np.asarray(timeline, dtype=np.float64)
 
+        defaults = {
+            "interpolation_rate_hz": self.TARGET_RATE_HZ,
+            "neuropil_scale": self.NEUROPIL_SCALE,
+            "baseline_percentile": self.BASELINE_PERCENTILE,
+            "smoothing_kernel": self.SMOOTHING_KERNEL,
+            "peak_prominence": self.PEAK_PROMINENCE,
+        }
+
         if raw_traces.size == 0 or neuropil_traces.size == 0:
             sections = self._empty_sections(timeline)
-            return sections, {
-                "processing_status": "no_data",
-                "interpolation_rate_hz": self.TARGET_RATE_HZ,
-                "neuropil_scale": self.NEUROPIL_SCALE,
-                "baseline_percentile": self.BASELINE_PERCENTILE,
-                "smoothing_kernel": self.SMOOTHING_KERNEL,
-                "peak_prominence": self.PEAK_PROMINENCE,
-            }
+            return sections, {"processing_status": "no_data", **defaults}
 
         if timeline.shape[0] != raw_traces.shape[1]:
             logger.warning(
@@ -154,17 +160,10 @@ class Suite2pV2(DataSource):
             sections = self._empty_sections(timeline)
             sections["processed"]["roi_fluorescence"] = roi_fluo
             sections["processed"]["neuropil_fluorescence"] = neuropil_fluo
-            meta = {
-                **filtered_meta,
-                "processing_status": "no_cells",
-                "interpolation_rate_hz": self.TARGET_RATE_HZ,
-                "neuropil_scale": self.NEUROPIL_SCALE,
-                "baseline_percentile": self.BASELINE_PERCENTILE,
-                "smoothing_kernel": self.SMOOTHING_KERNEL,
-                "peak_prominence": self.PEAK_PROMINENCE,
-            }
+            meta = {**filtered_meta, "processing_status": "no_cells", **defaults}
             return sections, meta
 
+        # Step 1: baseline and native $\Delta F / F$
         baseline = np.percentile(
             roi_fluo,
             self.BASELINE_PERCENTILE,
@@ -180,23 +179,77 @@ class Suite2pV2(DataSource):
             where=baseline_mask,
         )
 
-        interp_result = self._resample_traces(
-            traces=roi_fluo,
-            timeline=timeline,
-            target_rate=self.TARGET_RATE_HZ,
-        )
+        # Step 2: interpolate traces to a uniform time base
+        traces = roi_fluo.astype(np.float64, copy=False)
+        time_native = timeline.astype(np.float64, copy=False)
+        n_rois = traces.shape[0]
+        empty_values = np.empty((n_rois, 0), dtype=np.float64)
+        empty_times = np.empty((0,), dtype=np.float64)
 
-        interpolated = self._ensure_float32(interp_result["values"])
-        interp_times = self._ensure_float32(interp_result["timeline"])
-        interpolation_method = interp_result["method"]
-        interpolation_status = interp_result["status"]
+        interpolation_method = "unavailable"
+        interpolation_status = "insufficient_timeline"
+        interpolated = empty_values
+        interp_times = empty_times
 
-        interp_baseline = np.percentile(
-            interpolated,
-            self.BASELINE_PERCENTILE,
-            axis=1,
-            keepdims=True,
-        ).astype(np.float32, copy=False) if interpolated.size else np.empty((roi_fluo.shape[0], 0), dtype=np.float32)
+        if time_native.ndim != 1 or time_native.size != traces.shape[1]:
+            logger.warning(
+                "Suite2pV2: timeline shape mismatch",
+                extra={"phase": "suite2p_processing", "timeline": time_native.shape, "frames": traces.shape},
+            )
+        elif time_native.size < self.MIN_TIMELINE_POINTS:
+            interpolation_status = "insufficient_timeline"
+        elif not np.all(np.isfinite(time_native)):
+            interpolation_status = "invalid_timeline"
+        else:
+            normalized_time = time_native - time_native[0]
+            duration = normalized_time[-1]
+            if duration <= 0 or not np.isfinite(duration):
+                logger.warning(
+                    "Suite2pV2: invalid duration for interpolation",
+                    extra={"phase": "suite2p_processing", "duration": float(duration)},
+                )
+                interpolation_status = "invalid_duration"
+            elif not np.isfinite(self.TARGET_RATE_HZ) or self.TARGET_RATE_HZ <= 0:
+                interpolated = traces
+                interp_times = normalized_time
+                interpolation_method = "native"
+                interpolation_status = "native_rate"
+            else:
+                step = 1.0 / self.TARGET_RATE_HZ
+                n_samples = max(int(np.floor(duration / step)) + 1, self.MIN_INTERPOLATED_SAMPLES)
+                interp_times = np.linspace(0.0, step * (n_samples - 1), n_samples, dtype=np.float64)
+                try:
+                    interpolated = np.vstack([
+                        np.interp(interp_times, normalized_time, row) for row in traces
+                    ])
+                    interpolation_method = "linear"
+                    interpolation_status = "ok"
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "Suite2pV2: interpolation failed",
+                        extra={
+                            "phase": "suite2p_processing",
+                            "error": repr(exc),
+                            "method": "linear",
+                        },
+                    )
+                    interpolated = empty_values
+                    interp_times = empty_times
+                    interpolation_status = "interpolation_failed"
+
+        interpolated = self._ensure_float32(interpolated)
+        interp_times = self._ensure_float32(interp_times)
+
+        # Step 3: interpolated $\Delta F / F$ and smoothing
+        if interpolated.size:
+            interp_baseline = np.percentile(
+                interpolated,
+                self.BASELINE_PERCENTILE,
+                axis=1,
+                keepdims=True,
+            ).astype(np.float32, copy=False)
+        else:
+            interp_baseline = np.empty((roi_fluo.shape[0], 0), dtype=np.float32)
 
         interp_baseline_mask = np.abs(interp_baseline) > np.finfo(np.float64).eps
         interp_deltaf_f = np.full_like(interpolated, np.nan, dtype=np.float32)
@@ -208,14 +261,26 @@ class Suite2pV2(DataSource):
                 where=interp_baseline_mask,
             )
 
-        smoothed = self._moving_average(interp_deltaf_f, self.SMOOTHING_KERNEL)
+        if interp_deltaf_f.size == 0 or self.SMOOTHING_KERNEL <= 1:
+            smoothed = interp_deltaf_f
+        else:
+            kernel = np.ones(self.SMOOTHING_KERNEL, dtype=np.float64) / float(self.SMOOTHING_KERNEL)
+            smoothed = np.empty_like(interp_deltaf_f)
+            for idx, row in enumerate(interp_deltaf_f):
+                smoothed[idx] = np.convolve(row, kernel, mode="same")
+            smoothed = self._ensure_float32(smoothed)
 
         if interp_deltaf_f.size:
             mean_deltaf = np.nanmean(interp_deltaf_f, axis=0).astype(np.float32, copy=False)
         else:
             mean_deltaf = np.empty((0,), dtype=np.float32)
 
-        peaks = self._find_peaks(mean_deltaf)
+        try:
+            from scipy.signal import find_peaks
+        except Exception:
+            peaks = np.empty((0,), dtype=int)
+        else:
+            peaks, _ = find_peaks(mean_deltaf, prominence=self.PEAK_PROMINENCE) if mean_deltaf.size else (np.empty((0,), dtype=int), {})
 
         sections = {
             "processed": {
@@ -240,13 +305,9 @@ class Suite2pV2(DataSource):
         meta = {
             **filtered_meta,
             "processing_status": interpolation_status,
-            "interpolation_rate_hz": self.TARGET_RATE_HZ,
             "interpolation_method": interpolation_method,
-            "neuropil_scale": self.NEUROPIL_SCALE,
-            "baseline_percentile": self.BASELINE_PERCENTILE,
-            "smoothing_kernel": self.SMOOTHING_KERNEL,
-            "peak_prominence": self.PEAK_PROMINENCE,
             "interpolated_frames": int(interpolated.shape[1]) if interpolated.ndim == 2 else 0,
+            **defaults,
         }
 
         if baseline.size:
@@ -393,104 +454,6 @@ class Suite2pV2(DataSource):
             return value.item()
         return value
 
-    def _resample_traces(
-        self,
-        *,
-        traces: np.ndarray,
-        timeline: np.ndarray,
-        target_rate: float,
-    ) -> Dict[str, Any]:
-        traces = np.asarray(traces, dtype=np.float64)
-        timeline = np.asarray(timeline, dtype=np.float64)
-
-        n_rois = traces.shape[0]
-        empty_result = {
-            "values": np.empty((n_rois, 0), dtype=np.float64),
-            "timeline": np.empty((0,), dtype=np.float64),
-            "method": "unavailable",
-            "status": "insufficient_timeline",
-        }
-
-        if timeline.ndim != 1 or timeline.size != traces.shape[1]:
-            logger.warning(
-                "Suite2pV2: timeline shape mismatch",
-                extra={"phase": "suite2p_processing", "timeline": timeline.shape, "frames": traces.shape},
-            )
-            return empty_result
-
-        if timeline.size < self.MIN_TIMELINE_POINTS:
-            return empty_result
-
-        if not np.all(np.isfinite(timeline)):
-            return {**empty_result, "status": "invalid_timeline"}
-
-        normalized_time = timeline - timeline[0]
-        duration = normalized_time[-1]
-
-        if duration <= 0 or not np.isfinite(duration):
-            logger.warning(
-                "Suite2pV2: invalid duration for interpolation",
-                extra={"phase": "suite2p_processing", "duration": float(duration)},
-            )
-            return {**empty_result, "status": "invalid_duration"}
-
-        if not np.isfinite(target_rate) or target_rate <= 0:
-            return {
-                "values": traces,
-                "timeline": normalized_time,
-                "method": "native",
-                "status": "native_rate",
-            }
-
-        step = 1.0 / target_rate
-        n_samples = max(int(np.floor(duration / step)) + 1, self.MIN_INTERPOLATED_SAMPLES)
-        new_timeline = np.linspace(0.0, step * (n_samples - 1), n_samples, dtype=np.float64)
-
-        try:
-            interpolated = np.vstack([
-                np.interp(new_timeline, normalized_time, row) for row in traces
-            ])
-            method = "linear"
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "Suite2pV2: interpolation failed",
-                extra={
-                    "phase": "suite2p_processing",
-                    "error": repr(exc),
-                    "method": "linear",
-                },
-            )
-            return {**empty_result, "status": "interpolation_failed"}
-
-        return {
-            "values": interpolated,
-            "timeline": new_timeline,
-            "method": method,
-            "status": "ok",
-        }
-
-    @staticmethod
-    def _moving_average(data: np.ndarray, window: int) -> np.ndarray:
-        if data.size == 0 or window <= 1:
-            return data
-
-        kernel = np.ones(window, dtype=np.float64) / float(window)
-        smoothed = np.empty_like(data)
-        for idx, row in enumerate(data):
-            smoothed[idx] = np.convolve(row, kernel, mode="same")
-        return Suite2pV2._ensure_float32(smoothed)
-
-    def _find_peaks(self, mean_deltaf: np.ndarray) -> np.ndarray:
-        if mean_deltaf.size == 0:
-            return np.empty((0,), dtype=int)
-        try:
-            from scipy.signal import find_peaks
-        except Exception:
-            return np.empty((0,), dtype=int)
-
-        peaks, _ = find_peaks(mean_deltaf, prominence=self.PEAK_PROMINENCE)
-        return peaks
-
     # ------------------------------------------------------------------
     # Loading helpers
     # ------------------------------------------------------------------
@@ -501,7 +464,7 @@ class Suite2pV2(DataSource):
             raise ValueError(f"Expected numpy array in {path}, got {type(arr)}")
         return arr
 
-    def _load_companions(self, plane_dir: Path, f_shape: Tuple[int, int]) -> Tuple[Dict[str, Any], List[str]]:
+    def _load_companions(self, plane_dir: Path) -> Tuple[Dict[str, Any], List[str]]:
         required = tuple(self.required_files)
         optional = tuple(getattr(self, "optional_files", ()))
 
@@ -571,90 +534,63 @@ class Suite2pV2(DataSource):
                     return rate
         return None
 
-    def _simple_timeline(self, session_dir: Optional[Path], n_frames: int) -> tuple[np.ndarray, dict]:
-        """Build timeline using actual nidaq pulse timestamps from dataqueue.
-        
-        Uses interpolation to account for dropped pulses and clock drift.
-        For multi-plane acquisitions, creates corrected timeline for this plane.
-        """
+    def _nidaq_timeline(self, session_dir: Optional[Path], n_frames: int) -> tuple[np.ndarray, dict]:
+        """Build timeline using nidaq pulse timestamps from dataqueue."""
         if session_dir is None:
-            return self._fallback_timeline(n_frames), {"time_basis": "fallback"}
+            raise FileNotFoundError("Suite2pV2: session directory not found for nidaq timeline")
 
         dq_path = self._find_dataqueue(session_dir)
         if dq_path is None:
-            return self._fallback_timeline(n_frames), {"time_basis": "fallback"}
+            raise FileNotFoundError("Suite2pV2: dataqueue file not found for nidaq timeline")
 
-        try:
-            df = pd.read_csv(dq_path, low_memory=False)
-        except Exception:
-            return self._fallback_timeline(n_frames), {"time_basis": "fallback"}
+        df = pd.read_csv(dq_path, low_memory=False)
 
-        # Filter for nidaq device
         if "device_id" not in df.columns or "queue_elapsed" not in df.columns:
-            return self._fallback_timeline(n_frames), {"time_basis": "fallback"}
+            raise ValueError("Suite2pV2: dataqueue missing device_id/queue_elapsed columns")
 
         mask = df["device_id"].astype(str).str.contains("nidaq", case=False, na=False)
         nidaq = df.loc[mask].copy()
-
         if nidaq.empty:
-            return self._fallback_timeline(n_frames), {"time_basis": "fallback"}
+            raise ValueError("Suite2pV2: no nidaq rows found in dataqueue")
 
-        # Get nidaq timestamps and payload (frame counter)
         nidaq_times = pd.to_numeric(nidaq["queue_elapsed"], errors="coerce")
         nidaq_payload = pd.to_numeric(nidaq["payload"], errors="coerce")
-        
-        # Filter out NaN values
+
         valid_mask = nidaq_times.notna() & nidaq_payload.notna()
         nidaq_times = nidaq_times[valid_mask].to_numpy(dtype=np.float64)
         nidaq_payload = nidaq_payload[valid_mask].to_numpy(dtype=np.float64)
-        
-        if len(nidaq_times) == 0:
-            return self._fallback_timeline(n_frames), {"time_basis": "fallback"}
 
-        # Get queue start
-        queue_start = float(pd.to_numeric(df["queue_elapsed"], errors="coerce").dropna().iloc[0])
-        
-        # Convert to relative times
+        if nidaq_times.size == 0:
+            raise ValueError("Suite2pV2: nidaq timestamps empty after filtering")
+
+        queue_elapsed = pd.to_numeric(df["queue_elapsed"], errors="coerce").dropna()
+        if queue_elapsed.empty:
+            raise ValueError("Suite2pV2: dataqueue queue_elapsed is empty")
+
+        queue_start = float(queue_elapsed.iloc[0])
         nidaq_times_rel = nidaq_times - queue_start
-        
-        # Expected total frames for multi-plane acquisition
-        # If we have ~2x the frames, it's a 2-plane acquisition
-        expected_total_frames = n_frames * 2
-        decimation = 2
-        
-        # Build interpolator from actual pulse times and frame numbers
-        # This handles missing pulses by interpolating based on actual timestamps
-        interp_func = interpolate.interp1d(
-            nidaq_payload,
-            nidaq_times_rel,
-            kind='linear',
-            fill_value='extrapolate',
-            assume_sorted=False
-        )
-        
-        # Generate frame indices for this plane (assuming plane0 gets even frames: 0, 2, 4, ...)
-        # For expected_total_frames, we want frames 0, 2, 4, ... up to n_frames
-        plane_frame_indices = np.arange(0, expected_total_frames, decimation, dtype=np.float64)[:n_frames]
-        
-        # Interpolate to get timestamps for each frame in this plane
-        timeline = interp_func(plane_frame_indices)
-        
+
+        pulses_per_frame = max(int(round(len(nidaq_payload) / max(n_frames, 1))), 1)
+        expected_total_frames = n_frames * pulses_per_frame
+
+        order = np.argsort(nidaq_payload)
+        frame_counter = nidaq_payload[order]
+        frame_times = nidaq_times_rel[order]
+
+        plane_frame_indices = np.arange(0, expected_total_frames, pulses_per_frame, dtype=np.float64)[:n_frames]
+        timeline = np.interp(plane_frame_indices, frame_counter, frame_times)
+
         meta = {
             "time_basis": "nidaq_interpolated",
             "dataqueue_file": str(dq_path),
             "nidaq_pulses_received": int(len(nidaq_times)),
             "nidaq_pulses_expected": int(expected_total_frames),
-            "nidaq_pulses_missing": int(expected_total_frames - len(nidaq_times)),
-            "decimation_factor": int(decimation),
+            "nidaq_pulses_missing": int(max(expected_total_frames - len(nidaq_times), 0)),
+            "decimation_factor": int(pulses_per_frame),
             "queue_start": queue_start,
         }
 
         return timeline, meta
-
-    @staticmethod
-    def _fallback_timeline(n_frames: int) -> np.ndarray:
-        """Fallback timeline: evenly spaced at 1 Hz."""
-        return np.arange(n_frames, dtype=np.float64)
 
     def _find_session_dir(self, plane_dir: Path) -> Optional[Path]:
         """Walk up from plane_dir to find session directory or use inventory hint."""
@@ -689,9 +625,3 @@ class Suite2pV2(DataSource):
         candidates = sorted((session_dir / "beh").glob("*_dataqueue.csv"))
         return candidates[0] if candidates else None
 
-    def _find_psychopy(self, session_dir: Path) -> Optional[Path]:
-        """Find psychopy CSV in session/beh directory."""
-        candidates = sorted((session_dir / "beh").glob("*_psychopy.csv"))
-        # Filter out hidden files (starting with ._)
-        candidates = [p for p in candidates if not p.name.startswith("._")]
-        return candidates[0] if candidates else None
