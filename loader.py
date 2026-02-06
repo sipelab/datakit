@@ -286,8 +286,12 @@ class ExperimentStore:
                 df.columns = pd.MultiIndex.from_tuples(tuple_columns, names=["Source", "Feature"])
             else:
                 df.columns = pd.MultiIndex.from_product([["default"], df.columns], names=["Source", "Feature"])
-        self._materialized = df
         self._finalize_meta_frame()
+        meta_table = self._meta_table_to_wide()
+        if not meta_table.empty:
+            df = pd.concat([df, meta_table], axis=1)
+            df.columns.set_names(["Source", "Feature"], inplace=True)
+        self._materialized = df
         df.attrs["meta_frame"] = self.meta_frame
         df.attrs["session_attrs"] = dict(self.session_attrs)
         df.attrs["experiment_attrs"] = dict(self.experiment_attrs)
@@ -349,6 +353,46 @@ class ExperimentStore:
             self.meta_frame = pd.DataFrame(self._meta_rows, columns=self._meta_columns())
         else:
             self.meta_frame = pd.DataFrame(columns=self._meta_columns())
+
+    def _meta_table_to_wide(self) -> pd.DataFrame:
+        if self.meta_frame.empty:
+            return pd.DataFrame(index=self.inventory.index)
+        meta_columns = list(settings.dataset.meta_columns)
+        subject_col, session_col, task_col = settings.dataset.index_names
+        source_col = meta_columns[3] if len(meta_columns) > 3 else "Source"
+        key_col = meta_columns[4] if len(meta_columns) > 4 else "Key"
+        value_col = meta_columns[5] if len(meta_columns) > 5 else "Value"
+        index_cols = [subject_col, session_col, task_col]
+        meta = self.meta_frame.copy()
+        missing = [col for col in index_cols + [source_col, key_col, value_col] if col not in meta.columns]
+        if missing:
+            return pd.DataFrame(index=self.inventory.index)
+        pivot = meta.pivot_table(
+            index=index_cols,
+            columns=[source_col, key_col],
+            values=value_col,
+            aggfunc="first",
+        )
+        pivot = pivot.reindex(self.inventory.index)
+        if not pivot.empty:
+            pivot.columns = pd.MultiIndex.from_tuples(
+                [(str(source), f"meta.{key}") for source, key in pivot.columns],
+                names=["Source", "Feature"],
+            )
+        grouped = (
+            meta.groupby(index_cols + [source_col], dropna=False)[[key_col, value_col]]
+            .apply(lambda group: {row[key_col]: row[value_col] for _, row in group.iterrows()})
+        )
+        meta_dict = grouped.unstack(source_col)
+        meta_dict = meta_dict.reindex(self.inventory.index)
+        if not meta_dict.empty:
+            meta_dict.columns = pd.MultiIndex.from_tuples(
+                [(str(source), "meta") for source in meta_dict.columns],
+                names=["Source", "Feature"],
+            )
+        if pivot.empty and meta_dict.empty:
+            return pd.DataFrame(index=self.inventory.index)
+        return pd.concat([frame for frame in (pivot, meta_dict) if not frame.empty], axis=1)
 
     # ------------------------------------------------------------------
     # Persistence helpers
