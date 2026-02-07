@@ -21,9 +21,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from datakit import logger
+from ..._utils._logger import get_logger
 from datakit.sources.register import DataSource
 from datakit.datamodel import LoadedStream, StreamPayload
+
+logger = get_logger(__name__)
 
 try:  # pragma: no cover - optional dependency guard
     from scipy.interpolate import CubicSpline

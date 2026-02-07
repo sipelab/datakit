@@ -9,11 +9,13 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from datakit import logger
+from ..._utils._logger import get_logger
 
 from datakit.sources.register import DataSource
 from datakit.datamodel import LoadedStream
 from datakit.timeline import GlobalTimeline
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)

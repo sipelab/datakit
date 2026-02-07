@@ -5,11 +5,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from . import logger
+from ._utils._logger import get_logger
 from .datamodel import Manifest, ManifestEntry
 from .sources.register import DataSource
 
 _BIDS_COMPONENT_PATTERN = re.compile(r"(sub|ses|task)-([A-Za-z0-9]+)", re.IGNORECASE)
+
+logger = get_logger(__name__)
 
 
 def discover_manifest(experiment_dir: Path | str) -> Manifest:

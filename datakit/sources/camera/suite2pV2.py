@@ -10,8 +10,10 @@ import numpy as np
 import pandas as pd
 
 from datakit.sources.register import DataSource
-from datakit import logger
+from ..._utils._logger import get_logger
 from datakit.datamodel import LoadedStream, StreamPayload
+
+logger = get_logger(__name__)
 
 
 class Suite2pV2(DataSource):

@@ -10,9 +10,11 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from datakit import logger
+from ..._utils._logger import get_logger
 from datakit.sources.register import DataSource
 from datakit.datamodel import LoadedStream
+
+logger = get_logger(__name__)
 
 
 class PupilDLCSource(DataSource):

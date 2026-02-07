@@ -23,8 +23,10 @@ from typing import Callable, ClassVar, Iterable, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 
-from datakit import logger
+from ._utils._logger import get_logger
 from datakit.config import settings
+
+logger = get_logger(__name__)
 
 DeviceSelector = Union[str, Sequence[str], Callable[[pd.Series], pd.Series]]
 

@@ -248,8 +248,8 @@ class Psychopy(DataSource):
 
     def _align_time(self, values: np.ndarray, key_rt: float, offset: Optional[float]) -> np.ndarray:
         aligned = values.astype(np.float64, copy=True) - float(key_rt)
-        if offset is not None:
-            aligned = aligned - float(offset)
+        # if offset is not None:
+        #     aligned = aligned - float(offset)
         return aligned
 
     def _align_table(self, frame: pd.DataFrame, key_rt: float, offset: Optional[float]) -> pd.DataFrame:

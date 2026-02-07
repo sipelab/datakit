@@ -22,11 +22,13 @@ from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from datakit import logger
+from ._utils._logger import get_logger
 from datakit.config import settings
 from datakit.datamodel import LoadedStream
 from datakit.inventory import build_inventory
 from datakit.sources.register import DataSource
+
+logger = get_logger(__name__)
 
 
 LoaderFn = Callable[[str], object]

@@ -12,7 +12,9 @@ from datakit.config import settings
 from datakit.datamodel import LoadedStream
 from datakit.sources.register import DataSource
 from datakit.timeline import GlobalTimeline
-from ... import logger
+from ..._utils._logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class TreadmillSource(DataSource):
