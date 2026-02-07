@@ -118,6 +118,12 @@ class Psychopy(DataSource):
 
         # 5) Apply dataqueue offset and align times.
         dq_start, dq_meta = self._dataqueue_offset(path.parent, task)
+        exp_start_offset = None
+        exp_start_keypress_offset = None
+        exp_start_offset = self._calc_exp_start_offset(exp_start, dq_meta.get("abs_start_time"))
+        # Offset into psychopy-zero time (exp_start + keypress RT).
+        exp_start_keypress_offset = exp_start_offset - float(key_rt)
+        dq_start = float(exp_start_keypress_offset)
         aligned_t = self._align_time(row_time, key_rt, dq_start)
         aligned_table = self._align_table(trial_table, key_rt, dq_start)
 
@@ -144,10 +150,13 @@ class Psychopy(DataSource):
             "row_time_column": row_col,
             "key_resp_rt": key_rt,
             "key_resp_column": key_col,
-            "trimmed_rows": int(len(aligned_t)),
             "exp_start": exp_start.isoformat() if exp_start is not None else None,
             "start_offset_s": dq_start,
         }
+        if exp_start_offset is not None:
+            metrics["exp_start_offset_s"] = float(exp_start_offset)
+        if exp_start_keypress_offset is not None:
+            metrics["exp_start_keypress_offset_s"] = float(exp_start_keypress_offset)
         metrics.update(row_meta)
         metrics.update(dq_meta)
         metrics["time_basis"] = "psychopy_zero_based" if dq_start is not None else "psychopy_native"
@@ -159,8 +168,21 @@ class Psychopy(DataSource):
         text = str(value).strip()
         text = text.replace("h", ":", 1)
         text = re.sub(r":(\d{2})\.(\d{2}\.\d+)", r":\1:\2", text)
-        parsed = pd.to_datetime(text, errors="coerce", utc=True)
+        parsed = pd.to_datetime(text, errors="coerce", utc=False)
         return None if pd.isna(parsed) else parsed
+
+    def _strip_tz(self, value: pd.Timestamp) -> pd.Timestamp:
+        return value.tz_localize(None) if getattr(value, "tzinfo", None) else value
+
+    def _calc_exp_start_offset(self, exp_start: pd.Timestamp, abs_start_time: Any) -> Optional[float]:
+        if not abs_start_time:
+            return None
+        abs_start = pd.to_datetime(abs_start_time, errors="coerce", utc=False)
+        if pd.isna(abs_start):
+            return None
+        abs_start = self._strip_tz(abs_start)
+        exp_start = self._strip_tz(exp_start)
+        return (abs_start - exp_start).total_seconds()
 
     def _infer_task(self, file_path: Path) -> str | None:
         name = file_path.as_posix().lower()
@@ -209,7 +231,6 @@ class Psychopy(DataSource):
                         filled.loc[last_valid_idx + 1:] = max_time
                 meta = {
                     "row_time_column": col,
-                    "row_time_missing": int(series.isna().sum()),
                     "row_time_extended_to": float(max_time),
                 }
                 return filled.to_numpy(dtype=np.float64), col, meta
@@ -241,15 +262,13 @@ class Psychopy(DataSource):
             "dataqueue_pulses": int(pulses.size),
             "dataqueue_queue_start": queue_start,
             "abs_start_time": abs_start[0],
-            "dataqueue_start": start_rel,
-            "dataqueue_end": None,
         }
         return start_rel, meta
 
     def _align_time(self, values: np.ndarray, key_rt: float, offset: Optional[float]) -> np.ndarray:
         aligned = values.astype(np.float64, copy=True) - float(key_rt)
-        # if offset is not None:
-        #     aligned = aligned - float(offset)
+        if offset is not None:
+            aligned = aligned - float(offset)
         return aligned
 
     def _align_table(self, frame: pd.DataFrame, key_rt: float, offset: Optional[float]) -> pd.DataFrame:
