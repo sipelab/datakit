@@ -22,6 +22,7 @@ class TreadmillSource(DataSource):
     patterns = ("**/*_treadmill.csv", "**/*_treadmill_data.csv")
     camera_tag = None
     version = "3.0"
+    timeline_columns = ("time_elapsed_s",)
 
     timestamp_column = "timestamp"
     distance_columns = ("distance_mm", "distance")
@@ -197,6 +198,7 @@ class TreadmillSourceV2(DataSource):
     patterns = ("**/*_treadmill.csv", "**/*_treadmill_data.csv")
     camera_tag = None  # Not bound to camera
     version = "2.0"  # Enhanced version with improved alignment
+    timeline_columns = ("time_elapsed_s",)
     # Treat any pause longer than this gap as a true break in the data.
     smoothing_gap_threshold_s = 0.5
     # Resample the smoothed trace to this many evenly spaced points per second.
@@ -842,6 +844,7 @@ class TreadmillSourceV1(DataSource):
     patterns = ("**/*_treadmill.csv", "**/*_treadmill_data.csv")
     camera_tag = None  # Not bound to camera
     version = "1.0"
+    timeline_columns = ("time_elapsed_s", "timestamp")
     
     def load(self, path: Path) -> LoadedStream:
         """Simple version without advanced alignment features."""

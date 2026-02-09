@@ -21,6 +21,7 @@ class DataqueueSource(DataSource):
     patterns = ("**/*_dataqueue.csv",)
     camera_tag = None
     version = "1.1"
+    timeline_columns = ("master_elapsed_s", "queue_elapsed")
     time_column = "queue_elapsed"
     device_id_column = "device_id"
     device_timestamp_column = "device_ts"

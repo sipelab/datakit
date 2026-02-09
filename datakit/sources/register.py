@@ -8,9 +8,10 @@ maintaining parallel metadata structures.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, ClassVar, Dict, Iterable, Optional
+from typing import Any, ClassVar, Dict, Iterable, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 
 from datakit.config import settings
 from ..datamodel import LoadedStream
@@ -37,6 +38,8 @@ class DataSource:
     version: ClassVar[str] = settings.registry.default_version
     is_timeseries: ClassVar[bool] = True            # whether this source produces a time-indexed stream
     flatten_payload: ClassVar[bool] = True          # True → break into scalar/array columns
+    timeline_columns: ClassVar[Tuple[str, ...]] = ("time_elapsed_s", "time_s", "time", "t")
+    optional_time_columns: ClassVar[Tuple[str, ...]] = ()
 
     def __init_subclass__(cls) -> None:
         """Register subclasses automatically with version support."""
@@ -83,6 +86,55 @@ class DataSource:
         stream = LoadedStream(tag=tag, t=timeline, value=value, meta=meta_dict)
         setattr(self, "_last_loaded_stream", stream)
         return stream
+
+    def load_timeline(self, path: Path) -> tuple[np.ndarray, Dict[str, Any]]:
+        """Load only the timeline for a source, returning (timeline, info).
+
+        Subclasses can override to avoid full payload loading.
+        The default implementation calls load() then extract_timeline().
+        """
+
+        stream = self.load(path)
+        if not isinstance(stream, LoadedStream):
+            raise TypeError("load() did not return a LoadedStream")
+        return self.extract_timeline(stream)
+
+    # ------------------------------------------------------------------
+    # Timeline helpers
+    # ------------------------------------------------------------------
+    @classmethod
+    def extract_timeline(cls, stream: LoadedStream) -> tuple[np.ndarray, Dict[str, Any]]:
+        """Return a best-effort timeline array and metadata about its source."""
+
+        if not isinstance(stream, LoadedStream):
+            raise TypeError("extract_timeline expects a LoadedStream")
+
+        timeline = np.asarray(stream.t, dtype=np.float64)
+        info: Dict[str, Any] = {"source": "stream.t", "column": None}
+
+        if isinstance(stream.value, pd.DataFrame):
+            candidates: list[str] = []
+            for name in cls.timeline_columns:
+                if name not in candidates:
+                    candidates.append(name)
+            for name in getattr(cls, "optional_time_columns", ()):  # type: ignore[truthy-bool]
+                if name not in candidates:
+                    candidates.append(name)
+
+            for column in candidates:
+                if column in stream.value.columns:
+                    series = pd.to_numeric(stream.value[column], errors="coerce").dropna()
+                    if not series.empty:
+                        timeline = series.to_numpy(dtype=np.float64)
+                        info = {"source": "column", "column": column}
+                        break
+
+        return timeline, info
+
+    def get_timeline(self, path: Path) -> tuple[np.ndarray, Dict[str, Any]]:
+        """Load a source and return the extracted timeline and metadata."""
+
+        return self.load_timeline(path)
     
     @classmethod
     def get_registered_sources(cls) -> Dict[str, Dict[str, type["DataSource"]]]:

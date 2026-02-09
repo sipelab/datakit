@@ -27,6 +27,7 @@ class MesoMapSource(DataSource):
 	camera_tag = "meso_metadata"
 	version = "1.0"
 	flatten_payload = True
+	timeline_columns = ("frame",)
  
 	mask_suffix = ".mask.npy"
 	regions_suffix = ".regions.csv"

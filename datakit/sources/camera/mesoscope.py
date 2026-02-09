@@ -21,6 +21,7 @@ class MesoMetadataSource(DataSource):
     camera_tag = "meso_metadata"
     version = "1.0"
     flatten_payload = False
+    timeline_columns = ("time_elapsed_s", "ElapsedTime-ms", "runner_time_ms")
     json_entry_key = "p0"
     metadata_column = "camera_metadata"
     timestamp_preference = ("TimeReceivedByCore", "ElapsedTime-ms", "runner_time_ms")

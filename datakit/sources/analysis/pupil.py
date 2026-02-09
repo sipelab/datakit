@@ -33,6 +33,7 @@ class PupilDLCSource(DataSource):
     camera_tag = "pupil_metadata"  # Bind to pupil camera
     version = "1.0"
     flatten_payload = True
+    timeline_columns = ("time_elapsed_s",)
     default_frame_rate_hz = 20.0
     confidence_threshold = 0.7
     pixel_to_mm = 53.6
