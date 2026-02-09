@@ -43,6 +43,7 @@ class WheelEncoder(DataSource):
     patterns = ("**/*_wheel.csv",)
     camera_tag = None  # Not bound to camera
     version = "2.0"
+    timeline_columns = ("time_elapsed_s", "time_reference_s")
 
     required_columns = ("Clicks", "Time", "Speed")
     time_column = "Time"

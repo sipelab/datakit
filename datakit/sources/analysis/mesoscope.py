@@ -26,6 +26,7 @@ class MesoMeanSource(DataSource):
     patterns = ("**/*_meso-mean-trace.csv",)
     camera_tag = "meso_metadata"  # Bind to meso camera
     version = "1.0"
+    timeline_columns = ("time_elapsed_s",)
     required_columns = ("Slice", "Mean")
     assumed_frame_rate_hz = 50.0
     normalization_baseline = "min"

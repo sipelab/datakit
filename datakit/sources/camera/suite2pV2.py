@@ -22,6 +22,7 @@ class Suite2pV2(DataSource):
     tag = "suite2p"
     patterns = ("**/*_suite2p/**/F.npy",)
     version = "2.1"
+    timeline_columns = ("time_native_s", "time_elapsed_s")
 
     required_files: Tuple[str, ...] = ("Fneu.npy", "iscell.npy")
     optional_files: Tuple[str, ...] = ("ops.npy", "stat.npy")
