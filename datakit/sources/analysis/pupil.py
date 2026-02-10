@@ -28,10 +28,14 @@ class PupilDLCSource(DataSource):
     plot immediately without re-running post-processing code.
     """
     tag = "pupil_dlc"
-    patterns = ("**/*_pupilDLC_*_full.pickle", 
-                "**/*_full.pickle",)
+    patterns = (
+        # "**/*_pupilDLC_*_full.pickle",
+        # "**/*_full.pickle",
+        "**/*_pupilDLC_*.h5",
+        "**/*_pupilDLC_*.hdf5",
+    )
     camera_tag = "pupil_metadata"  # Bind to pupil camera
-    version = "1.0"
+    version = "2.0" #version 1.0 uses the pickle loader, 2.0 uses the h5 loader with improved error handling and confidence checks
     flatten_payload = True
     timeline_columns = ("time_elapsed_s",)
     default_frame_rate_hz = 20.0
@@ -46,10 +50,12 @@ class PupilDLCSource(DataSource):
     warn_on_low_confidence = True
     
     def load(self, path: Path) -> LoadedStream:
-        """Deserialize a DeepLabCut pickle and return a structured stream."""
-        # Use the proven pupil analysis functions
-        raw_df = self._load_deeplabcut_pickle(path)
-        analyzed_df = self._analyze_pupil_data(raw_df)
+        """Load DeepLabCut output and return a structured stream."""
+        if self.version.startswith("1."):
+            analyzed_df = self._analyze_pupil_data(self._load_deeplabcut_pickle(path))
+        elif self.version.startswith("2."):
+            analyzed_df = self._analyze_pupil_h5(path)
+
 
         n_frames = len(analyzed_df)
         t = np.arange(n_frames, dtype=np.float64) / float(self.default_frame_rate_hz)
@@ -62,6 +68,99 @@ class PupilDLCSource(DataSource):
             value=analyzed_df,
             meta={"source_file": str(path), "n_frames": len(analyzed_df)}
         )
+
+    def _analyze_pupil_h5(
+        self,
+        filepath: Path,
+        *,
+        confidence_threshold: float | None = None,
+        pixel_to_mm: float | None = None,
+        dpi: int | None = None,
+    ) -> pd.DataFrame:
+        """Load DeepLabCut HDF5 output and compute pupil diameters."""
+        threshold = self.confidence_threshold if confidence_threshold is None else confidence_threshold
+        px_to_mm = self.pixel_to_mm if pixel_to_mm is None else pixel_to_mm
+        dpi_value = self.dpi if dpi is None else dpi
+
+        with pd.HDFStore(filepath, mode="r") as store:
+            keys = store.keys()
+            if not keys:
+                raise ValueError(f"No keys found in HDF5 file: {filepath}")
+            key = "/df_with_missing" if "/df_with_missing" in keys else keys[0]
+            frame = store.get(key)
+
+        if not isinstance(frame.columns, pd.MultiIndex) or frame.columns.nlevels < 3:
+            raise ValueError(f"Unexpected HDF5 column format for {filepath}")
+
+        scorer = str(frame.columns.get_level_values(0)[0])
+        sub = frame[scorer]
+
+        bodyparts = sorted(set(sub.columns.get_level_values(0)))
+        coords_list: list[np.ndarray] = []
+        conf_list: list[np.ndarray] = []
+        used_bodyparts: list[str] = []
+
+        for bodypart in bodyparts:
+            try:
+                x = sub[(bodypart, "x")].to_numpy(dtype=np.float64)
+                y = sub[(bodypart, "y")].to_numpy(dtype=np.float64)
+                likelihood = sub[(bodypart, "likelihood")].to_numpy(dtype=np.float64)
+            except KeyError:
+                continue
+            coords_list.append(np.stack([x, y], axis=1))
+            conf_list.append(likelihood)
+            used_bodyparts.append(bodypart)
+
+        if not coords_list:
+            raise ValueError(f"No coordinate columns found in {filepath}")
+
+        coords = np.stack(coords_list, axis=1)
+        conf = np.stack(conf_list, axis=1)
+
+        any_confident = np.any(conf >= threshold)
+        if self.warn_on_low_confidence and not any_confident:
+            logger.warning(
+                "PupilDLCSource: no confidence values above threshold",
+                extra={
+                    "phase": "pupil_dlc_analysis",
+                    "threshold": threshold,
+                    "dpi": dpi_value,
+                    "bodyparts": used_bodyparts,
+                },
+            )
+
+        n_points = coords.shape[1]
+        pairs = [(a, b) for a, b in self.landmark_pairs if a < n_points and b < n_points]
+        if not pairs:
+            diameters = np.full(coords.shape[0], np.nan, dtype=np.float64)
+        else:
+            dists = []
+            for a, b in pairs:
+                diff = coords[:, a, :] - coords[:, b, :]
+                dist = np.linalg.norm(diff, axis=1)
+                valid = (conf[:, a] >= threshold) & (conf[:, b] >= threshold)
+                dist = np.where(valid, dist, np.nan)
+                dists.append(dist)
+            stacked = np.vstack(dists).T
+            valid_counts = np.sum(np.isfinite(stacked), axis=1)
+            diameters = np.full(stacked.shape[0], np.nan, dtype=np.float64)
+            valid_mask = valid_counts > 0
+            if not np.any(valid_mask) and self.warn_on_low_confidence:
+                logger.warning(
+                    "PupilDLCSource: no valid landmark pairs after confidence filtering",
+                    extra={
+                        "phase": "pupil_dlc_analysis",
+                        "threshold": threshold,
+                        "bodyparts": used_bodyparts,
+                    },
+                )
+            if np.any(valid_mask):
+                with np.errstate(all="ignore"):
+                    diameters[valid_mask] = np.nanmean(stacked[valid_mask], axis=1)
+
+        pupil_series = pd.Series(diameters, index=frame.index).interpolate().divide(px_to_mm)
+        return pd.DataFrame({"pupil_diameter_mm": pupil_series})
+
     
     def _load_deeplabcut_pickle(self, filepath: Path) -> pd.DataFrame:
         """Load DeepLabCut pickle output into standardized DataFrame."""
