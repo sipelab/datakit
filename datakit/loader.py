@@ -317,6 +317,12 @@ class ExperimentStore:
         # df.attrs["meta_columns"] = list(self._meta_columns())
         return df
 
+    def release(self) -> None:
+        """Release materialized data and metadata to free memory."""
+
+        self._materialized = None
+        self._reset_meta_state()
+
     # ------------------------------------------------------------------
     # Metadata helpers
     # ------------------------------------------------------------------
