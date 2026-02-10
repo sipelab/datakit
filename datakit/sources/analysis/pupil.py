@@ -8,6 +8,7 @@ diameters.
 
 import pandas as pd
 import numpy as np
+import re
 from pathlib import Path
 
 from ..._utils._logger import get_logger
@@ -48,6 +49,7 @@ class PupilDLCSource(DataSource):
     confidence_key = "confidence"
     frame_index_name = "frame"
     warn_on_low_confidence = True
+    alignment_device_id = "thorcam"
     
     def load(self, path: Path) -> LoadedStream:
         """Load DeepLabCut output and return a structured stream."""
@@ -58,16 +60,111 @@ class PupilDLCSource(DataSource):
 
 
         n_frames = len(analyzed_df)
-        t = np.arange(n_frames, dtype=np.float64) / float(self.default_frame_rate_hz)
+        timing = self._aligned_timeline(path, n_frames)
+        if timing is None:
+            raise FileNotFoundError("PupilDLCSource: ThorCam dataqueue alignment not found")
+        t, timing_meta = timing
+
         analyzed_df = analyzed_df.copy()
         analyzed_df["time_elapsed_s"] = t
+
+        meta = {
+            "source_file": str(path),
+            "n_frames": n_frames,
+            "class_name": self.__class__.__name__,
+            "class_version": self.version,
+            "confidence_threshold": self.confidence_threshold,
+            "pixel_to_mm": self.pixel_to_mm,
+            "landmark_pairs": self.landmark_pairs,
+            **timing_meta,
+        }
 
         return LoadedStream(
             tag=self.tag,
             t=t,
             value=analyzed_df,
-            meta={"source_file": str(path), "n_frames": len(analyzed_df)}
+            meta=meta
         )
+
+    def _aligned_timeline(self, path: Path, n_frames: int) -> tuple[np.ndarray, dict] | None:
+        session_dir = self._find_session_dir(path)
+        if session_dir is None:
+            return None
+
+        dq_path = self._find_dataqueue(session_dir)
+        if dq_path is None:
+            return None
+
+        df = pd.read_csv(dq_path, usecols=["queue_elapsed", "device_id"], low_memory=False)
+        mask = df["device_id"].astype(str).str.contains(self.alignment_device_id, case=False, na=False)
+        camera = df.loc[mask].copy()
+        camera["queue_elapsed"] = pd.to_numeric(camera["queue_elapsed"], errors="coerce")
+        camera.dropna(subset=["queue_elapsed"], inplace=True)
+        if camera.empty:
+            return None
+
+        times = camera["queue_elapsed"].to_numpy(dtype=np.float64)
+        n_anchors = int(times.size)
+        if n_anchors == n_frames:
+            aligned = times
+            method = "direct"
+        else:
+            anchor_index = np.arange(n_anchors, dtype=np.float64)
+            frame_index = np.linspace(0.0, float(n_anchors - 1), num=n_frames, dtype=np.float64)
+            aligned = np.interp(frame_index, anchor_index, times)
+            method = "resampled"
+
+        aligned = aligned - aligned[0]
+
+        meta = {
+            "time_basis": "dataqueue",
+            "dataqueue_file": str(dq_path),
+            "dataqueue_device": self.alignment_device_id,
+            "dataqueue_anchors": n_anchors,
+            "dataqueue_alignment": method,
+        }
+        return aligned, meta
+
+    def _find_session_dir(self, path: Path) -> Path | None:
+        current = path.parent
+        max_levels = 5
+        for _ in range(max_levels):
+            if current == current.parent:
+                break
+            if (current / "beh").is_dir():
+                return current
+            current = current.parent
+
+        if "processed" in path.parts:
+            idx = path.parts.index("processed")
+            exp_root = Path(*path.parts[:idx])
+            data_dir = exp_root / "data"
+            if data_dir.is_dir():
+                subject = next((part for part in path.parts if part.startswith("sub-")), None)
+                session = next((part for part in path.parts if part.startswith("ses-")), None)
+                if subject is None or session is None:
+                    tokens = " ".join([path.name, path.parent.name, str(path)])
+                    subject_match = re.search(r"(sub-[A-Za-z0-9]+)", tokens)
+                    session_match = re.search(r"(ses-[A-Za-z0-9]+)", tokens)
+                    if subject_match and subject is None:
+                        subject = subject_match.group(1)
+                    if session_match and session is None:
+                        session = session_match.group(1)
+                if subject and session:
+                    candidate = data_dir / subject / session
+                    if (candidate / "beh").is_dir():
+                        return candidate
+                for subject_dir in data_dir.iterdir():
+                    if subject_dir.is_dir() and subject_dir.name.startswith("sub-"):
+                        for session_dir in subject_dir.iterdir():
+                            if session_dir.is_dir() and session_dir.name.startswith("ses-"):
+                                if (session_dir / "beh").is_dir():
+                                    return session_dir
+        return None
+
+    def _find_dataqueue(self, session_dir: Path) -> Path | None:
+        candidates = sorted((session_dir / "beh").glob("*_dataqueue.csv"))
+        return candidates[0] if candidates else None
 
     def _analyze_pupil_h5(
         self,
