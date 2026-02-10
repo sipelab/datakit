@@ -59,6 +59,7 @@ class WheelEncoder(DataSource):
     alignment_poly_degree = 1
     distance_integration_method = "trapezoid"
     absolute_device_id = "encoder"
+    alignment_origin_device_id = "ThorCam"
 
     def load(self, path: Path) -> LoadedStream:
         raw = pd.read_csv(path)
@@ -160,90 +161,57 @@ class WheelEncoder(DataSource):
     # ------------------------------------------------------------------
     def _align_to_dataqueue(self, frame: pd.DataFrame, directory: Path) -> tuple[pd.DataFrame, dict]:
         """Map wheel timestamps onto the nidaq master clock via dataqueue anchors."""
-
         timeline = GlobalTimeline.for_directory(directory)
         if timeline is None:
-            return frame, {"time_basis": self.alignment_time_basis_wheel}
+            raise FileNotFoundError("WheelEncoder: dataqueue file not found for alignment")
 
         encoder_slice = timeline.slice(
             lambda ids: ids.str.contains(self.anchor_filter_pattern, case=False, na=False, regex=False)
         )
-        anchors = encoder_slice.rows
-
-        if anchors.empty or self.dataqueue_payload_column not in anchors.columns:
-            return frame, {
-                "time_basis": self.alignment_time_basis_wheel,
-                "dataqueue_file": str(timeline.source_path),
-            }
-
-        anchors = anchors[[self.queue_elapsed_column, self.dataqueue_payload_column]].copy()
-        anchors[self.queue_elapsed_column] = pd.to_numeric(anchors[self.queue_elapsed_column], errors="coerce")
-        anchors["click_delta"] = pd.to_numeric(anchors[self.dataqueue_payload_column], errors="coerce")
-        anchors.dropna(subset=[self.queue_elapsed_column, "click_delta"], inplace=True)
-
-        if anchors.empty:
-            return frame, {
-                "time_basis": self.alignment_time_basis_wheel,
-                "dataqueue_file": str(timeline.source_path),
-            }
-
-        anchors["click_delta"] = anchors["click_delta"].astype(int)
-        anchors["click_position"] = anchors["click_delta"].cumsum()
-        anchors["queue_rel"] = anchors[self.queue_elapsed_column] - anchors[self.queue_elapsed_column].iloc[0]
-
-        wheel_points = frame.loc[frame["click_delta"] != 0, ["click_position", "time_s"]].copy()
-        queue_points = anchors.loc[anchors["click_delta"] != 0, ["click_position", "queue_rel"]].copy()
-
-        if wheel_points.empty or queue_points.empty:
-            return frame, {
-                "time_basis": self.alignment_time_basis_wheel,
-                "dataqueue_file": str(timeline.source_path),
-            }
-
-        wheel_points["click_position"] = (
-            wheel_points["click_position"] - wheel_points["click_position"].iloc[0]
-        )
-        queue_points["click_position"] = (
-            queue_points["click_position"] - queue_points["click_position"].iloc[0]
-        )
-        wheel_points["time_s"] = wheel_points["time_s"] - wheel_points["time_s"].iloc[0]
-
-        wheel_points = wheel_points.drop_duplicates("click_position")
-        queue_points = queue_points.drop_duplicates("click_position")
-
-        merged = wheel_points.merge(queue_points, on="click_position", how="inner")
-
-        if len(merged) < self.alignment_min_points:
+        encoder_times = encoder_slice.queue_elapsed().to_numpy(dtype=np.float64)
+        if encoder_times.size < 2:
             logger.warning(
-                "WheelEncoder: insufficient anchors for alignment",
-                extra={
-                    "phase": "wheel_align",
-                    "dataqueue": str(timeline.source_path),
-                    "anchors": len(merged),
-                },
+                "WheelEncoder: insufficient encoder anchors (%d). "
+                "Returning unaligned wheel timeline.",
+                encoder_times.size,
             )
-            return frame, {
+            return frame.copy(), {
                 "time_basis": self.alignment_time_basis_wheel,
                 "dataqueue_file": str(timeline.source_path),
-                "alignment_anchors": len(merged),
+                "dataqueue_alignment": "insufficient_anchors",
+                "dataqueue_anchors": int(encoder_times.size),
+                "alignment_device": self.anchor_filter_pattern,
             }
 
-        x = merged["time_s"].to_numpy(dtype=np.float64)
-        y = merged["queue_rel"].to_numpy(dtype=np.float64)
-        slope, intercept = np.polyfit(x, y, self.alignment_poly_degree)
+        origin_slice = timeline.slice(
+            lambda ids: ids.str.contains(self.alignment_origin_device_id, case=False, na=False, regex=False)
+        )
+        origin_times = origin_slice.queue_elapsed().to_numpy(dtype=np.float64)
+        if origin_times.size == 0:
+            raise ValueError("WheelEncoder: ThorCam anchors missing for alignment")
 
-        predicted = slope * x + intercept
-        residual = y - predicted
-        ss_res = float(np.sum(residual ** 2))
-        ss_tot = float(np.sum((y - np.mean(y)) ** 2)) if len(y) > 1 else 0.0
-        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+        n_samples = len(frame)
+        n_anchors = int(encoder_times.size)
+        if n_anchors == n_samples:
+            aligned_times = encoder_times
+            method = "direct"
+        else:
+            anchor_index = np.arange(n_anchors, dtype=np.float64)
+            frame_index = np.linspace(0.0, float(n_anchors - 1), num=n_samples, dtype=np.float64)
+            aligned_times = np.interp(frame_index, anchor_index, encoder_times)
+            method = "resampled"
 
+        origin = float(origin_times[0])
         aligned = frame.copy()
-        aligned["time_s"] = slope * aligned["time_s"] + intercept
+        aligned["time_s"] = aligned_times - origin
+
+        encoder_start = float(encoder_times[0])
+        origin_offset = encoder_start - origin
 
         elapsed_abs = timeline.absolute_for_device(self.absolute_device_id)
         if elapsed_abs:
             elapsed, absolute = elapsed_abs
+            elapsed = elapsed + origin_offset
             aligned_t = aligned["time_s"].to_numpy(dtype=np.float64)
             aligned["time_absolute"] = np.interp(aligned_t, elapsed, np.arange(len(absolute))).astype(int)
             aligned["time_absolute"] = aligned["time_absolute"].map(
@@ -253,10 +221,12 @@ class WheelEncoder(DataSource):
         return aligned, {
             "time_basis": self.alignment_time_basis_dataqueue,
             "dataqueue_file": str(timeline.source_path),
-            "alignment_coefficients": {"a": float(slope), "b": float(intercept)},
-            "alignment_r2": float(r2),
-            "alignment_anchors": int(len(merged)),
-            "queue_elapsed_start": float(anchors[self.queue_elapsed_column].iloc[0]),
+            "dataqueue_alignment": method,
+            "dataqueue_anchors": n_anchors,
+            "alignment_device": self.anchor_filter_pattern,
+            "alignment_origin_device": self.alignment_origin_device_id,
+            "alignment_origin_queue_elapsed": origin,
+            "alignment_origin_offset": float(origin_offset),
         }
 
     @staticmethod
