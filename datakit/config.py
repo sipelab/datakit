@@ -1,6 +1,6 @@
 """Centralized configuration for ``datakit`` infrastructure.
 
-The file gathers all tweakable defaults (registry behaviour, dataset layout,
+The file gathers all tweakable defaults (source metadata keys, dataset layout,
 timeline parsing, debug helpers, etc.) into a single, human-readable module so
 new contributors can understand *which* knobs exist without spelunking through
 call sites.
@@ -13,18 +13,13 @@ from typing import Dict, Tuple
 
 
 @dataclass
-class RegistryDefaults:
-    """Base behaviour for the :class:`datakit.sources.register.DataSource` registry.
+class SourceMetaDefaults:
+    """Keys used to annotate stream metadata for all data sources."""
 
-    These knobs rarely change at runtime, but documenting them here makes it
-    obvious what metadata ``DataSource`` subclasses are expected to emit.
-    """
-
-    default_version: str = "1.0"
-    auto_register: bool = True
     meta_camera_key: str = "camera_tag"
     meta_timeseries_key: str = "is_timeseries"
     meta_source_key: str = "source_tag"
+    meta_interval_key: str = "is_interval"
 
 
 @dataclass
@@ -67,6 +62,7 @@ class TimelineDefaults:
 
     dataqueue_glob: str = "*_dataqueue.csv"
     queue_column: str = "queue_elapsed"
+    window_device_patterns: Tuple[str, ...] = ("dhyana", "mesoscope")
 
 
 @dataclass
@@ -81,7 +77,7 @@ class DebugDefaults:
 class Settings:
     """Container aggregating all configuration namespaces for callers."""
 
-    registry: RegistryDefaults = field(default_factory=RegistryDefaults)
+    sources: SourceMetaDefaults = field(default_factory=SourceMetaDefaults)
     dataset: DatasetLayout = field(default_factory=DatasetLayout)
     timeline: TimelineDefaults = field(default_factory=TimelineDefaults)
     debug: DebugDefaults = field(default_factory=DebugDefaults)

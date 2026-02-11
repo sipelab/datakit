@@ -12,22 +12,25 @@ from pathlib import Path
 import re
 from datetime import datetime
 
-from datakit.sources.register import DataSource
-from datakit.datamodel import LoadedStream
+from datakit.sources.register import SourceContext, TimeseriesSource
 
 
-class SessionNotesSource(DataSource):
+class SessionNotesSource(TimeseriesSource):
     """Load timestamped notes recorded by the experimenter."""
     tag = "notes"
     patterns = ("**/*_notes.txt",)
     camera_tag = None
-    version = "1.0"
     flatten_payload = False
     line_pattern = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}):\s*(.*)"
     timestamp_format = "%Y-%m-%d %H:%M:%S"
     empty_time_value = 0.0
     
-    def load(self, path: Path) -> LoadedStream:
+    def build_timeseries(
+        self,
+        path: Path,
+        *,
+        context: SourceContext | None = None,
+    ) -> tuple[np.ndarray, pd.DataFrame, dict]:
         """Parse ``*_notes.txt`` into a timeline-aware dataframe."""
         with open(path, 'r') as f:
             notes = f.readlines()
@@ -57,9 +60,4 @@ class SessionNotesSource(DataSource):
             t = np.array([self.empty_time_value])
             df = pd.DataFrame({'timestamp': [], 'note': []})
         
-        return LoadedStream(
-            tag=self.tag,
-            t=t.astype(np.float64),
-            value=df,
-            meta={"source_file": str(path), "n_notes": len(note_texts)}
-        )
+        return t.astype(np.float64), df, {"source_file": str(path), "n_notes": len(note_texts)}

@@ -12,8 +12,10 @@ import pandas as pd
 from .datamodel import Manifest
 from .discover import discover_manifest
 from .inventory import entries_to_inventory
+from .sources import get_source_class
+from .sources.register import SourceContext
 
-# Ensure all DataSource subclasses register themselves
+# Import sources so the registry is initialized.
 from . import sources as _data_sources  # noqa: F401
 
 
@@ -110,6 +112,108 @@ class ExperimentData:
         self._prefer_processed = prefer_processed
         self._absolute_paths = absolute_paths
         self._include_task_level = include_task_level
+
+    # ------------------------------------------------------------------
+    # Convenience loading helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def infer_root(path: Path) -> Path:
+        """Infer experiment root from a file path."""
+
+        for parent in (path, *path.parents):
+            if (parent / "data").exists() or (parent / "processed").exists():
+                return parent
+        return path.parent
+
+    @classmethod
+    def load_from_path(
+        cls,
+        tag: str,
+        path: Path | str,
+        *,
+        include_task_level: bool | None = True,
+    ) -> object:
+        """Convenience loader that infers the experiment root from a file path."""
+
+        input_path = Path(path)
+        root = cls.infer_root(input_path)
+        experiment = cls(root, include_task_level=include_task_level)
+        return experiment.load_by_path(tag, input_path)
+
+    def _context_for_index(self, index_tuple: tuple[Any, ...]) -> SourceContext:
+        row = self._inventory.loc[index_tuple]
+        row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+        subject = str(index_tuple[0]) if len(index_tuple) > 0 else "unknown"
+        session = str(index_tuple[1]) if len(index_tuple) > 1 else "unknown"
+        task = str(index_tuple[2]) if len(index_tuple) > 2 else None
+        return SourceContext(subject=subject, session=session, task=task, inventory_row=row_dict)
+
+    def load(
+        self,
+        tag: str,
+        *,
+        subject: str,
+        session: str,
+        task: str | None = None,
+    ) -> object:
+        """Load a source for a specific inventory row."""
+
+        if self.has_task_level:
+            if task is None:
+                raise KeyError("task must be provided when inventory includes a task level")
+            index_tuple = (subject, session, task)
+        else:
+            index_tuple = (subject, session)
+
+        if tag not in self._inventory.columns:
+            raise KeyError(f"Tag '{tag}' not found in inventory")
+
+        path_value = self._inventory.loc[cast(tuple[Any, ...], index_tuple), tag]
+        if isinstance(path_value, float) and pd.isna(path_value):
+            raise FileNotFoundError(
+                f"Missing '{tag}' path for ({subject}, {session}, {task})"
+            )
+
+        path = Path(str(path_value))
+        loader = get_source_class(tag)()
+        context = self._context_for_index(cast(tuple[Any, ...], index_tuple))
+        return loader.load(path, context=context)
+
+    def load_by_path(
+        self,
+        tag: str,
+        path: Path | str,
+    ) -> object:
+        """Load a source by resolving its inventory row from the path."""
+
+        resolved_path, context = self.resolve_source(tag, path)
+        loader = get_source_class(tag)()
+        return loader.load(resolved_path, context=context)
+
+    def resolve_source(self, tag: str, path: Path | str) -> tuple[Path, SourceContext]:
+        """Resolve a path to its inventory row and return (path, context)."""
+
+        if tag not in self._inventory.columns:
+            raise KeyError(f"Tag '{tag}' not found in inventory")
+
+        input_path = Path(path)
+        candidates = {
+            str(input_path),
+            str(input_path.resolve()),
+            input_path.as_posix(),
+            input_path.resolve().as_posix(),
+        }
+
+        series = self._inventory[tag].astype(str)
+        match = series.isin(candidates)
+        if not match.any():
+            raise ValueError(f"No inventory entry found for tag '{tag}' and path '{path}'")
+
+        index_tuple = match[match].index[0]
+        row = self._inventory.loc[index_tuple]
+        path_value = row[tag]
+        context = self._context_for_index(cast(tuple[Any, ...], index_tuple))
+        return Path(str(path_value)), context
 
     # ------------------------------------------------------------------
     # Public accessors

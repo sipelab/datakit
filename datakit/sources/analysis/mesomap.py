@@ -15,19 +15,16 @@ import numpy as np
 import pandas as pd
 
 from datakit.config import settings
-from datakit.datamodel import LoadedStream
-from datakit.sources.register import DataSource
+from datakit.sources.register import SourceContext, TimeseriesSource
 
 
-class MesoMapSource(DataSource):
-	"""Load mesomap trace CSVs plus optional mask/region metadata."""
+class MesoMapSource(TimeseriesSource):
+	"""Load mesomap traces and attach optional mask/region metadata."""
 
 	tag = "mesomap"
 	patterns = ("**/*_mesoscope.ome_traces.csv",)
 	camera_tag = "meso_metadata"
-	version = "1.0"
 	flatten_payload = True
-	timeline_columns = ("frame",)
  
 	mask_suffix = ".mask.npy"
 	regions_suffix = ".regions.csv"
@@ -35,7 +32,12 @@ class MesoMapSource(DataSource):
 	frame_column = "frame"
 	time_basis = "mesomap_frame"
 
-	def load(self, path: Path) -> LoadedStream:
+	def build_timeseries(
+		self,
+		path: Path,
+		*,
+		context: SourceContext | None = None,
+	) -> tuple[np.ndarray, pd.DataFrame, dict]:
 		trace_df = pd.read_csv(path)
 
 		if self.frame_column not in trace_df.columns:
@@ -46,6 +48,13 @@ class MesoMapSource(DataSource):
 
 		trace_columns = [col for col in trace_df.columns if col != self.frame_column]
 		timeline = trace_df[self.frame_column].to_numpy(dtype=np.float64)
+		timeline_meta = {"time_basis": self.time_basis}
+		aligned = self._aligned_timeline(context, len(trace_df))
+		if aligned is not None:
+			timeline, timeline_meta = aligned
+
+		payload_df = trace_df.loc[:, trace_columns].copy()
+		payload_df["time_elapsed_s"] = timeline
 
 		regions_df, roi_to_mask, missing_regions = self._load_regions(path, trace_columns)
 		mask_info = self._load_mask(path)
@@ -55,9 +64,11 @@ class MesoMapSource(DataSource):
 			"n_frames": len(trace_df),
 			"n_rois": len(trace_columns),
 			"trace_columns": trace_columns,
+			"frame_column": self.frame_column,
+			"frame_index": trace_df[self.frame_column].to_numpy(dtype=np.float64),
 			"roi_to_mask_label": roi_to_mask,
 			"roi_missing_region_metadata": missing_regions,
-			"time_basis": self.time_basis,
+			**timeline_meta,
 			"scope": settings.dataset.session_scope,
 			**mask_info,
 		}
@@ -71,7 +82,69 @@ class MesoMapSource(DataSource):
 				}
 			)
 
-		return self._create_stream(self.tag, timeline, trace_df, meta=meta)
+		return timeline, payload_df, meta
+
+	def _aligned_timeline(
+		self,
+		context: SourceContext | None,
+		n_frames: int,
+	) -> tuple[np.ndarray, dict] | None:
+		if context is None:
+			return None
+
+		if context.dataqueue_frame is not None:
+			aligned = self._aligned_from_frame(context.dataqueue_frame, n_frames)
+			if aligned is not None:
+				return aligned
+
+		if context.master_timeline is not None and context.master_timeline.shape[0] == n_frames:
+			return context.master_timeline, {
+				"time_basis": "master_timeline",
+				"dataqueue_alignment": "direct",
+				"dataqueue_anchors": int(n_frames),
+			}
+
+		return None
+
+	def _aligned_from_frame(
+		self,
+		frame: pd.DataFrame,
+		n_frames: int,
+	) -> tuple[np.ndarray, dict] | None:
+		device_col = "device_id"
+		queue_col = settings.timeline.queue_column
+		if device_col not in frame.columns or queue_col not in frame.columns:
+			return None
+
+		device_series = frame[device_col].astype(str)
+		mask = pd.Series(False, index=frame.index)
+		for pattern in settings.timeline.window_device_patterns:
+			mask |= device_series.str.contains(pattern, case=False, na=False, regex=False)
+
+		if not mask.any():
+			return None
+
+		times = pd.to_numeric(frame.loc[mask, queue_col], errors="coerce").dropna().to_numpy(dtype=np.float64)
+		if times.size == 0:
+			return None
+
+		times = times - times[0]
+		n_anchors = int(times.size)
+		if n_anchors == n_frames:
+			return times, {
+				"time_basis": "dataqueue",
+				"dataqueue_alignment": "direct",
+				"dataqueue_anchors": n_anchors,
+			}
+
+		anchor_index = np.arange(n_anchors, dtype=np.float64)
+		frame_index = np.linspace(0.0, float(n_anchors - 1), num=n_frames, dtype=np.float64)
+		aligned = np.interp(frame_index, anchor_index, times)
+		return aligned, {
+			"time_basis": "dataqueue",
+			"dataqueue_alignment": "resampled",
+			"dataqueue_anchors": n_anchors,
+		}
 
 	def _mask_path(self, path: Path) -> Path:
 		return path.with_suffix(self.mask_suffix)

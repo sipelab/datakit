@@ -33,9 +33,8 @@ import re
 import numpy as np
 import pandas as pd
 
-from datakit.sources.register import DataSource
-from datakit.datamodel import LoadedStream, StreamPayload
-from datakit.timeline import GlobalTimeline
+from datakit.sources.register import IntervalSeriesSource, SourceContext
+from datakit.timeline import DataqueueIndex
 
 
 
@@ -47,12 +46,11 @@ _TASK_ALIASES = {
 _TIME_SUFFIXES = (".started", ".stopped", ".rt", ".t")
 
 
-class Psychopy(DataSource):
-    """Load the raw Psychopy CSV with task-specific trial metadata."""
+class Psychopy(IntervalSeriesSource):
+    """Load Psychopy trial windows as an interval table."""
 
     tag = "psychopy"
     patterns = ("**/*_psychopy.csv",)
-    version = "3.1"
     task_pattern = _TASK_PATTERN
     task_aliases = _TASK_ALIASES
     time_suffixes = _TIME_SUFFIXES
@@ -85,9 +83,13 @@ class Psychopy(DataSource):
     dataqueue_device_match = "nidaq"
     dataqueue_payload_column = "payload"
     dataqueue_payload_value = 1
-    
-    
-    def load(self, path: Path) -> LoadedStream:
+    def build_intervals(
+        self,
+        path: Path,
+        *,
+        context: SourceContext | None = None,
+    ) -> tuple[pd.DataFrame, dict]:
+        context = self._require_context(context)
         # 1) Read raw psychopy CSV.
         raw = pd.read_csv(path, low_memory=False)
 
@@ -117,7 +119,7 @@ class Psychopy(DataSource):
             exp_start = self._parse_exp_start(exp_start_raw.dropna().iloc[0])
 
         # 5) Apply dataqueue offset and align times.
-        dq_start, dq_meta = self._dataqueue_offset(path.parent, task)
+        dq_start, dq_meta = self._dataqueue_offset(context)
         exp_start_offset = None
         exp_start_keypress_offset = None
         exp_start_offset = self._calc_exp_start_offset(exp_start, dq_meta.get("abs_start_time"))
@@ -138,10 +140,25 @@ class Psychopy(DataSource):
                     self._build_window_list(aligned_table, "window_gray_start", "window_gray_stop")
                 ] * len(aligned_table)
 
-        # 7) Package payload and metrics.
-        payload = StreamPayload.table(
-            aligned_table.rename(columns={c: f"{task_branch}_{c}" for c in aligned_table.columns})
-        )
+        # 7) Build interval table and metrics.
+        interval_start = None
+        interval_stop = None
+        if "window_grating_start" in aligned_table.columns and "window_grating_stop" in aligned_table.columns:
+            interval_start = aligned_table["window_grating_start"]
+            interval_stop = aligned_table["window_grating_stop"]
+        elif "window_gray_start" in aligned_table.columns and "window_gray_stop" in aligned_table.columns:
+            interval_start = aligned_table["window_gray_start"]
+            interval_stop = aligned_table["window_gray_stop"]
+        else:
+            interval_start = pd.Series(aligned_t, index=aligned_table.index)
+            interval_stop = pd.Series(aligned_t, index=aligned_table.index)
+
+        intervals = aligned_table.rename(
+            columns={c: f"{task_branch}_{c}" for c in aligned_table.columns}
+        ).copy()
+        intervals["start_s"] = pd.to_numeric(interval_start, errors="coerce")
+        intervals["stop_s"] = pd.to_numeric(interval_stop, errors="coerce")
+        intervals = self._apply_experiment_window(intervals, context, dq_start)
         metrics = {
             "source_file": str(path),
             "n_rows": int(len(raw)),
@@ -162,7 +179,7 @@ class Psychopy(DataSource):
         metrics["time_basis"] = "psychopy_zero_based" if dq_start is not None else "psychopy_native"
         metrics["alignment_method"] = "keypress_relative"
 
-        return LoadedStream(tag=self.tag, t=aligned_t, value=payload, meta=metrics)
+        return intervals, metrics
 
     def _parse_exp_start(self, value: Any) -> Optional[pd.Timestamp]:
         text = str(value).strip()
@@ -236,19 +253,31 @@ class Psychopy(DataSource):
                 return filled.to_numpy(dtype=np.float64), col, meta
         raise ValueError("Psychopy requires a display_*.started column with at least 2 numeric values.")
 
-    def _dataqueue_offset(self, directory: Path, task: Optional[str]) -> tuple[Optional[float], dict]:
+    def _dataqueue_offset(self, context: SourceContext) -> tuple[Optional[float], dict]:
         #TODO: If a dataqueue does not have nidaq payload==1 but may start at nidaq==2,
         # treat the first pulse as the start and log a warning. 
-        candidates = sorted(directory.glob(f"*{task}*_dataqueue.csv"))
-        dq_path = candidates[0]
-        frame = GlobalTimeline._load_dataqueue(dq_path)
-        timeline = GlobalTimeline(directory.resolve(), dq_path, frame)
-        queue_all = timeline.queue_series()
-
-        queue_start = float(queue_all.iloc[0])
-        device_slice = timeline.slice(self.dataqueue_device_match)
-        abs_start = device_slice.packet_absolute().to_numpy(dtype=str)
-        pulses = pd.to_numeric(device_slice.rows.get(self.dataqueue_elapsed_column), errors="coerce")
+        dq_path = context.path_for("dataqueue")
+        if context.dataqueue_frame is not None:
+            frame = context.dataqueue_frame
+            queue_all = pd.to_numeric(frame.get(self.dataqueue_elapsed_column), errors="coerce").dropna()
+            if queue_all.empty:
+                raise ValueError("Dataqueue frame contains no queue_elapsed samples")
+            queue_start = float(queue_all.iloc[0])
+            device_series = frame.get(self.dataqueue_device_column, pd.Series(dtype=str)).astype(str)
+            mask = device_series.str.contains(self.dataqueue_device_match, case=False, na=False, regex=False)
+            device_rows = frame.loc[mask]
+            pulses = pd.to_numeric(device_rows.get(self.dataqueue_elapsed_column), errors="coerce")
+            abs_start = pd.to_datetime(device_rows.get("device_ts"), errors="coerce", utc=True)
+            abs_start = abs_start.dropna().dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ").to_numpy(dtype=str)
+        else:
+            if dq_path is None:
+                raise FileNotFoundError("Psychopy: dataqueue path not available")
+            timeline = DataqueueIndex.from_path(dq_path)
+            queue_all = timeline.queue_series()
+            queue_start = float(queue_all.iloc[0])
+            device_slice = timeline.slice(self.dataqueue_device_match)
+            abs_start = device_slice.packet_absolute().to_numpy(dtype=str)
+            pulses = pd.to_numeric(device_slice.rows.get(self.dataqueue_elapsed_column), errors="coerce")
         # if self.dataqueue_payload_column in device_slice.rows.columns:
         #     payload = pd.to_numeric(device_slice.rows[self.dataqueue_payload_column], errors="coerce")
         #     pulses = pulses.loc[payload == self.dataqueue_payload_value]
@@ -258,12 +287,30 @@ class Psychopy(DataSource):
 
         start_rel = float(pulses.iloc[0]) - 0
         meta = {
-            "dataqueue_file": str(timeline.source_path),
+            "dataqueue_file": str(dq_path) if dq_path is not None else None,
             "dataqueue_pulses": int(pulses.size),
             "dataqueue_queue_start": queue_start,
-            "abs_start_time": abs_start[0],
+            "abs_start_time": abs_start[0] if len(abs_start) else None,
         }
         return start_rel, meta
+
+    def _apply_experiment_window(
+        self,
+        intervals: pd.DataFrame,
+        context: SourceContext,
+        dq_start: float | None,
+    ) -> pd.DataFrame:
+        if context.experiment_window is None or dq_start is None:
+            return intervals
+        start, stop = context.experiment_window
+        window_start = float(start) - float(dq_start)
+        window_stop = float(stop) - float(dq_start)
+
+        intervals = intervals.copy()
+        intervals["start_s"] = intervals["start_s"].clip(lower=window_start, upper=window_stop)
+        intervals["stop_s"] = intervals["stop_s"].clip(lower=window_start, upper=window_stop)
+        mask = (intervals["stop_s"] >= window_start) & (intervals["start_s"] <= window_stop)
+        return intervals.loc[mask].reset_index(drop=True)
 
     def _align_time(self, values: np.ndarray, key_rt: float, offset: Optional[float]) -> np.ndarray:
         aligned = values.astype(np.float64, copy=True) - float(key_rt)

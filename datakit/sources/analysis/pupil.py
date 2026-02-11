@@ -1,69 +1,82 @@
-"""Pupil DeepLabCut analysis data source.
+"""Pupil DeepLabCut analysis data source."""
 
-Parses the nested pickle emitted by the DeepLabCut pipeline, reconstructs per-
-frame landmark coordinates and confidences, and summarizes them as a convenient
-time-indexed :class:`~datakit.datamodel.LoadedStream` with derived pupil
-diameters.
-"""
+from __future__ import annotations
 
-import pandas as pd
-import numpy as np
-import re
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
 from ..._utils._logger import get_logger
-from datakit.sources.register import DataSource
-from datakit.datamodel import LoadedStream
+from datakit.sources.camera.pupil import PupilMetadataSource
+from datakit.sources.register import SourceContext, TimeseriesSource
+from datakit.timeline import DataqueueIndex
 
 logger = get_logger(__name__)
 
 
-class PupilDLCSource(DataSource):
-    """Load DeepLabCut pupil analysis results and compute diameters.
+class PupilDLCSource(TimeseriesSource):
+    """Load DeepLabCut HDF5 output and compute pupil diameters."""
 
-    The loader unwraps DeepLabCut's dictionary-of-dictionaries format, converts
-    the coordinates/confidence arrays into tidy pandas columns, and annotates
-    each sample with an evenly spaced ``time_elapsed_s`` axis derived from the
-    configured frame rate.  It additionally runs a small analysis pass that
-    estimates pupil diameter in millimetres, which downstream dashboards can
-    plot immediately without re-running post-processing code.
-    """
     tag = "pupil_dlc"
     patterns = (
-        # "**/*_pupilDLC_*_full.pickle",
-        # "**/*_full.pickle",
         "**/*_pupilDLC_*.h5",
         "**/*_pupilDLC_*.hdf5",
     )
-    camera_tag = "pupil_metadata"  # Bind to pupil camera
-    version = "2.0" #version 1.0 uses the pickle loader, 2.0 uses the h5 loader with improved error handling and confidence checks
+    camera_tag = "pupil_metadata"
     flatten_payload = True
-    timeline_columns = ("time_elapsed_s",)
     default_frame_rate_hz = 20.0
     confidence_threshold = 0.7
     pixel_to_mm = 53.6
     dpi = 300
     landmark_pairs = ((0, 1), (2, 3), (4, 5), (6, 7))
-    metadata_key = "metadata"
-    coordinates_key = "coordinates"
-    confidence_key = "confidence"
-    frame_index_name = "frame"
     warn_on_low_confidence = True
     alignment_device_id = "thorcam"
-    
-    def load(self, path: Path) -> LoadedStream:
-        """Load DeepLabCut output and return a structured stream."""
-        if self.version.startswith("1."):
-            analyzed_df = self._analyze_pupil_data(self._load_deeplabcut_pickle(path))
-        elif self.version.startswith("2."):
-            analyzed_df = self._analyze_pupil_h5(path)
 
+    def build_timeseries(
+        self,
+        path: Path,
+        *,
+        context: SourceContext | None = None,
+    ) -> tuple[np.ndarray, pd.DataFrame, dict]:
+        """Load DeepLabCut output and return a time-indexed table."""
+        context = self._require_context(context)
+        analyzed_df = self._analyze_pupil_h5(path)
 
         n_frames = len(analyzed_df)
-        timing = self._aligned_timeline(path, n_frames)
+        timing = self._aligned_timeline(context, n_frames)
         if timing is None:
-            raise FileNotFoundError("PupilDLCSource: ThorCam dataqueue alignment not found")
-        t, timing_meta = timing
+            metadata_path = context.path_for("pupil_metadata")
+            if metadata_path is None:
+                raise FileNotFoundError(
+                    "PupilDLCSource: ThorCam alignment missing and pupil metadata not found"
+                )
+            logger.warning(
+                "PupilDLCSource: ThorCam alignment missing; falling back to metadata timeline."
+            )
+            metadata_stream = PupilMetadataSource().load(metadata_path, context=context)
+            metadata_t = metadata_stream.t
+            if metadata_t.size == 0:
+                raise ValueError("PupilDLCSource: pupil metadata contains no timeline samples")
+            metadata_t = metadata_t - metadata_t[0]
+            n_meta = int(metadata_t.size)
+            if n_meta == n_frames:
+                t = metadata_t
+                method = "metadata_direct"
+            else:
+                anchor_index = np.arange(n_meta, dtype=np.float64)
+                frame_index = np.linspace(0.0, float(n_meta - 1), num=n_frames, dtype=np.float64)
+                t = np.interp(frame_index, anchor_index, metadata_t)
+                method = "metadata_resampled"
+
+            timing_meta = {
+                "time_basis": "pupil_metadata",
+                "pupil_metadata_file": str(metadata_path),
+                "pupil_metadata_alignment": method,
+                "pupil_metadata_frames": n_meta,
+            }
+        else:
+            t, timing_meta = timing
 
         analyzed_df = analyzed_df.copy()
         analyzed_df["time_elapsed_s"] = t
@@ -72,38 +85,27 @@ class PupilDLCSource(DataSource):
             "source_file": str(path),
             "n_frames": n_frames,
             "class_name": self.__class__.__name__,
-            "class_version": self.version,
             "confidence_threshold": self.confidence_threshold,
             "pixel_to_mm": self.pixel_to_mm,
             "landmark_pairs": self.landmark_pairs,
             **timing_meta,
         }
 
-        return LoadedStream(
-            tag=self.tag,
-            t=t,
-            value=analyzed_df,
-            meta=meta
-        )
+        return t, analyzed_df, meta
 
-    def _aligned_timeline(self, path: Path, n_frames: int) -> tuple[np.ndarray, dict] | None:
-        session_dir = self._find_session_dir(path)
-        if session_dir is None:
+    def _aligned_timeline(self, context: SourceContext, n_frames: int) -> tuple[np.ndarray, dict] | None:
+        if context.dataqueue_frame is not None:
+            times = self._aligned_from_frame(context.dataqueue_frame)
+            dq_path = context.path_for("dataqueue")
+        else:
+            dq_path = context.require_path("dataqueue")
+            timeline = DataqueueIndex.from_path(dq_path)
+            device_slice = timeline.slice(
+                lambda ids: ids.str.contains(self.alignment_device_id, case=False, na=False, regex=False)
+            )
+            times = device_slice.queue_elapsed().to_numpy(dtype=np.float64)
+        if times.size == 0:
             return None
-
-        dq_path = self._find_dataqueue(session_dir)
-        if dq_path is None:
-            return None
-
-        df = pd.read_csv(dq_path, usecols=["queue_elapsed", "device_id"], low_memory=False)
-        mask = df["device_id"].astype(str).str.contains(self.alignment_device_id, case=False, na=False)
-        camera = df.loc[mask].copy()
-        camera["queue_elapsed"] = pd.to_numeric(camera["queue_elapsed"], errors="coerce")
-        camera.dropna(subset=["queue_elapsed"], inplace=True)
-        if camera.empty:
-            return None
-
-        times = camera["queue_elapsed"].to_numpy(dtype=np.float64)
         n_anchors = int(times.size)
         if n_anchors == n_frames:
             aligned = times
@@ -118,53 +120,22 @@ class PupilDLCSource(DataSource):
 
         meta = {
             "time_basis": "dataqueue",
-            "dataqueue_file": str(dq_path),
+            "dataqueue_file": str(dq_path) if dq_path is not None else None,
             "dataqueue_device": self.alignment_device_id,
             "dataqueue_anchors": n_anchors,
             "dataqueue_alignment": method,
         }
         return aligned, meta
 
-    def _find_session_dir(self, path: Path) -> Path | None:
-        current = path.parent
-        max_levels = 5
-        for _ in range(max_levels):
-            if current == current.parent:
-                break
-            if (current / "beh").is_dir():
-                return current
-            current = current.parent
-
-        if "processed" in path.parts:
-            idx = path.parts.index("processed")
-            exp_root = Path(*path.parts[:idx])
-            data_dir = exp_root / "data"
-            if data_dir.is_dir():
-                subject = next((part for part in path.parts if part.startswith("sub-")), None)
-                session = next((part for part in path.parts if part.startswith("ses-")), None)
-                if subject is None or session is None:
-                    tokens = " ".join([path.name, path.parent.name, str(path)])
-                    subject_match = re.search(r"(sub-[A-Za-z0-9]+)", tokens)
-                    session_match = re.search(r"(ses-[A-Za-z0-9]+)", tokens)
-                    if subject_match and subject is None:
-                        subject = subject_match.group(1)
-                    if session_match and session is None:
-                        session = session_match.group(1)
-                if subject and session:
-                    candidate = data_dir / subject / session
-                    if (candidate / "beh").is_dir():
-                        return candidate
-                for subject_dir in data_dir.iterdir():
-                    if subject_dir.is_dir() and subject_dir.name.startswith("sub-"):
-                        for session_dir in subject_dir.iterdir():
-                            if session_dir.is_dir() and session_dir.name.startswith("ses-"):
-                                if (session_dir / "beh").is_dir():
-                                    return session_dir
-        return None
-
-    def _find_dataqueue(self, session_dir: Path) -> Path | None:
-        candidates = sorted((session_dir / "beh").glob("*_dataqueue.csv"))
-        return candidates[0] if candidates else None
+    def _aligned_from_frame(self, frame: pd.DataFrame) -> np.ndarray:
+        device_col = "device_id"
+        time_col = "queue_elapsed"
+        if device_col not in frame.columns or time_col not in frame.columns:
+            return np.array([], dtype=np.float64)
+        device_series = frame[device_col].astype(str)
+        mask = device_series.str.contains(self.alignment_device_id, case=False, na=False, regex=False)
+        times = pd.to_numeric(frame.loc[mask, time_col], errors="coerce").dropna()
+        return times.to_numpy(dtype=np.float64)
 
     def _analyze_pupil_h5(
         self,
@@ -174,7 +145,7 @@ class PupilDLCSource(DataSource):
         pixel_to_mm: float | None = None,
         dpi: int | None = None,
     ) -> pd.DataFrame:
-        """Load DeepLabCut HDF5 output and compute pupil diameters."""
+        """Compute pupil diameters from DeepLabCut HDF5 output."""
         threshold = self.confidence_threshold if confidence_threshold is None else confidence_threshold
         px_to_mm = self.pixel_to_mm if pixel_to_mm is None else pixel_to_mm
         dpi_value = self.dpi if dpi is None else dpi
@@ -255,187 +226,5 @@ class PupilDLCSource(DataSource):
                 with np.errstate(all="ignore"):
                     diameters[valid_mask] = np.nanmean(stacked[valid_mask], axis=1)
 
-        pupil_series = pd.Series(diameters, index=frame.index).interpolate().divide(px_to_mm)
+        pupil_series = pd.Series(diameters, index=frame.index).interpolate() / px_to_mm
         return pd.DataFrame({"pupil_diameter_mm": pupil_series})
-
-    
-    def _load_deeplabcut_pickle(self, filepath: Path) -> pd.DataFrame:
-        """Load DeepLabCut pickle output into standardized DataFrame."""
-        data = pd.read_pickle(filepath)
-
-        # Build dictionaries for coordinates and confidence
-        coordinates_dict = {}
-        confidence_dict = {}
-        for frame_key, frame_data in data.items():
-            if frame_key == self.metadata_key:
-                continue  # Skip metadata entry
-                
-            # Extract coordinates and confidence from the nested structure
-            coords_raw = frame_data.get(self.coordinates_key)
-            conf_raw = frame_data.get(self.confidence_key)
-            
-            if coords_raw is not None and conf_raw is not None:
-                # Handle the nested structure: coordinates is a tuple containing a list of arrays
-                # confidence is a list of arrays
-                if isinstance(coords_raw, tuple) and len(coords_raw) > 0:
-                    coord_arrays = coords_raw[0]  # Extract the list from the tuple
-                    # Stack the coordinate arrays into a single array of shape (n_landmarks, 2)
-                    coordinates = np.vstack([arr.flatten()[:2] for arr in coord_arrays])
-                else:
-                    coordinates = coords_raw
-                    
-                if isinstance(conf_raw, list):
-                    # Extract confidence values from the list of arrays
-                    confidence = np.array([arr.flatten()[0] for arr in conf_raw])
-                else:
-                    confidence = conf_raw
-                    
-                coordinates_dict[frame_key] = coordinates
-                confidence_dict[frame_key] = confidence
-
-        # Create series from the dictionaries
-        coords_series = pd.Series(coordinates_dict)
-        conf_series = pd.Series(confidence_dict)
-
-        # Create the DataFrame
-        df = pd.DataFrame({
-            self.coordinates_key: coords_series,
-            self.confidence_key: conf_series,
-        })
-        df.index.name = self.frame_index_name
-        
-        return df
-    
-    def _analyze_pupil_data(
-        self,
-        pickle_data: pd.DataFrame,
-        *,
-        confidence_threshold: float | None = None,
-        pixel_to_mm: float | None = None,
-        dpi: int | None = None,
-    ) -> pd.DataFrame:
-        """
-        Analyze pupil data from DeepLabCut output.
-
-        This function processes a pandas DataFrame containing per-frame DeepLabCut outputs
-        with 'coordinates' and 'confidence' columns, skipping an initial metadata row,
-        and computes interpolated pupil diameters in millimetres.
-
-        Steps
-        -----
-        1. Skip the first (metadata) row.
-        2. Extract and convert 'coordinates' and 'confidence' to NumPy arrays.
-        3. For each frame:
-           - Squeeze arrays and validate dimensions.
-           - Mark landmarks with confidence ≥ threshold.
-           - Compute Euclidean distances for predefined landmark pairs.
-           - Average valid distances as pupil diameter or assign NaN.
-        4. Build a pandas Series of diameters, interpolate missing values, convert from pixels to mm.
-        5. Reindex to include the metadata index, then drop the initial NaN to align with valid frames.
-
-        Parameters
-        ----------
-        pickle_data : pandas.DataFrame
-            Input DataFrame with an initial metadata row. Must contain:
-            - 'coordinates': array-like of shape (n_points, 2) per entry
-            - 'confidence': array-like of shape (n_points,) per entry
-        confidence_threshold : float, optional
-            Minimum confidence to include a landmark in diameter computation.
-            Default is 0.7.
-        pixel_to_mm : float, optional
-            Conversion factor from pixels to millimetres.
-            Default is 53.6.
-        dpi : int, optional
-            Dots-per-inch resolution (not used directly).
-            Default is 300.
-
-        Returns
-        -------
-        pandas.DataFrame
-            One-column DataFrame ('pupil_diameter_mm') indexed by the input labels
-            (excluding the metadata row), containing linearly interpolated
-            pupil diameter measurements in millimetres.
-        """
-        import statistics as st
-        import math
-        
-        def euclidean_distance(coord1, coord2):
-            """Calculate the Euclidean distance between two points."""
-            return math.dist(coord1, coord2)
-
-        # 1) pull lists (no need to skip metadata row since we already filtered it in loader)
-        threshold = self.confidence_threshold if confidence_threshold is None else confidence_threshold
-        px_to_mm = self.pixel_to_mm if pixel_to_mm is None else pixel_to_mm
-        dpi_value = self.dpi if dpi is None else dpi
-
-        coords_list = pickle_data[self.coordinates_key].tolist()
-        conf_list = pickle_data[self.confidence_key].tolist()
-        
-        # Return a warning if no confidence values are above the threshold
-        if self.warn_on_low_confidence and not any(np.any(np.array(c) >= threshold) for c in conf_list):
-            logger.warning(
-                "PupilDLCSource: no confidence values above threshold",
-                extra={
-                    "phase": "pupil_dlc_analysis",
-                    "threshold": threshold,
-                    "dpi": dpi_value,
-                },
-            )
-            
-        # 2) to numpy arrays (they should already be numpy arrays from the loader)
-        coords_arrs = coords_list
-        conf_arrs = conf_list
-
-        # DEBUG: print first 3 shapes
-        # for idx, (c, f) in enumerate(zip(coords_arrs[:3], conf_arrs[:3])):
-        #     print(f"[DEBUG] frame {idx} coords.shape={c.shape}, conf.shape={f.shape}")
-            
-        # Print the first few values of c and f
-        # for idx, (c, f) in enumerate(zip(coords_arrs[:3], conf_arrs[:3])):
-        #     print(f"[DEBUG] frame {idx} coords values:\n{c}")
-        #     print(f"[DEBUG] frame {idx} conf values:\n{f}")
-            
-        # 3) compute mean diameters
-        diameters = []
-        for i, (coords, conf) in enumerate(zip(coords_arrs, conf_arrs)):
-            pts   = np.squeeze(coords)   # expect (n_points, 2)
-            cvals = np.squeeze(conf)     # expect (n_points,)
-            # DEBUG unexpected shapes
-            if pts.ndim != 2 or cvals.ndim != 1:
-                if self.warn_on_low_confidence:
-                    logger.warning(
-                        "PupilDLCSource: unexpected coordinate or confidence shape",
-                        extra={
-                            "phase": "pupil_dlc_analysis",
-                            "frame_index": int(i),
-                            "coord_shape": str(pts.shape),
-                            "conf_shape": str(cvals.shape),
-                        },
-                    )
-                diameters.append(np.nan)
-                continue
-            #print(f"cval type ={type(cvals)}, with values of type {cvals.dtype}\n compared to {type(confidence_threshold)}")
-            valid = cvals >= threshold
-            # print("cvals:", cvals)
-            # print("threshold:", confidence_threshold)
-            # print("mask  :", valid)  
-            ds = [
-                euclidean_distance(pts[a], pts[b])
-                for a, b in self.landmark_pairs
-                if a < pts.shape[0] and b < pts.shape[0] and valid[a] and valid[b]
-            ]
-            diameters.append(st.mean(ds) if ds else np.nan)
-
-        # 4) interpolate & convert to mm, align with original index
-        pupil_series = (
-            pd.Series(diameters, index=pickle_data.index)
-            .interpolate()
-            .divide(px_to_mm)
-        )
-
-        # DEBUG
-        # print(f"[DEBUG analyze_pupil_data] input index={pickle_data.index}")
-        # print(f"[DEBUG analyze_pupil_data] output series head:\n{pupil_series.head()}")
-
-        # 5) return DataFrame 
-        return pd.DataFrame({'pupil_diameter_mm': pupil_series})

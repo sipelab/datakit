@@ -8,25 +8,26 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
-from datakit.datamodel import LoadedStream
-from datakit.sources.register import DataSource
+from datakit.sources.register import IntervalSeriesSource, SourceContext
 
 
-class SessionTimestampsSource(DataSource):
-    """Load per-device start/stop timestamps and expose them as metadata."""
+class SessionTimestampsSource(IntervalSeriesSource):
+    """Load per-device start/stop timestamps as intervals."""
 
     tag = "timestamps"
     patterns = ("**/*_timestamps.csv",)
     camera_tag = None
-    version = "1.0"
-    is_timeseries = False
 
     required_columns = ("device_id", "started", "stopped")
 
-    def load(self, path: Path) -> LoadedStream:
+    def build_intervals(
+        self,
+        path: Path,
+        *,
+        context: SourceContext | None = None,
+    ) -> tuple[pd.DataFrame, dict]:
         frame = pd.read_csv(path)
 
         missing = [col for col in self.required_columns if col not in frame.columns]
@@ -37,15 +38,21 @@ class SessionTimestampsSource(DataSource):
         for column in ("started", "stopped"):
             normalized[column] = pd.to_datetime(normalized[column], errors="coerce")
 
-        # Represent as a static stream; single sample with metadata table
-        t = np.zeros(len(normalized), dtype=np.float64)
+        if normalized["started"].notna().any():
+            origin = normalized["started"].min()
+        else:
+            origin = pd.Timestamp(0)
+
+        normalized["start_s"] = (normalized["started"] - origin).dt.total_seconds()
+        normalized["stop_s"] = (normalized["stopped"] - origin).dt.total_seconds()
 
         meta = {
             "source_file": str(path),
             "devices": normalized["device_id"].dropna().astype(str).tolist(),
+            "time_basis": "timestamps_relative",
         }
 
-        return self._create_stream(self.tag, t, normalized, meta=meta)
+        return normalized, meta
 
 
 __all__ = ["SessionTimestampsSource"]
