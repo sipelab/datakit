@@ -8,8 +8,7 @@ from typing import Any, ClassVar, Dict, Iterable, Mapping
 import numpy as np
 import pandas as pd
 
-from datakit.datamodel import LoadedStream
-from datakit.sources.register import DataSource
+from datakit.sources.register import SourceContext, TableSource
 from datakit.config import settings
 
 
@@ -43,14 +42,12 @@ def _clean_config_value(value: Any) -> Any:
 
 
 
-class SessionConfigSource(DataSource):
+class SessionConfigSource(TableSource):
     """Load configuration CSVs and surface subject/session attributes."""
 
     tag = "session_config"
     patterns = ("**/*_configuration.csv",)
     camera_tag = None
-    version = "1.0"
-    is_timeseries = False
     flatten_payload = True
 
     DEFAULT_VARIABLE_MAPPING: ClassVar[Dict[str, tuple[str, ...]]] = {
@@ -60,7 +57,12 @@ class SessionConfigSource(DataSource):
     variable_mapping: ClassVar[Dict[str, tuple[str, ...]]] = DEFAULT_VARIABLE_MAPPING.copy()
 
 
-    def load(self, path: Path) -> LoadedStream:
+    def build_table(
+        self,
+        path: Path,
+        *,
+        context: SourceContext | None = None,
+    ) -> tuple[np.ndarray, pd.DataFrame, dict]:
         raw_df = pd.read_csv(path)
 
         required_columns = {"Parameter", "Value"}
@@ -125,4 +127,4 @@ class SessionConfigSource(DataSource):
             **flattened_scope,
         }
 
-        return self._create_stream(self.tag, t, df, meta=meta)
+        return t, df, meta

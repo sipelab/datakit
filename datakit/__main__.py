@@ -5,11 +5,11 @@ from pathlib import Path
 
 from datakit.datamodel import LoadedStream
 from datakit.experiment import ExperimentData
-from datakit.sources.register import DataSource
+from datakit.sources import get_source_class
 
 
 def _ensure_datasource_registry() -> None:
-    # Importing datakit.sources ensures all DataSource subclasses register with the registry.
+    """Import datakit sources so the registry module is initialized."""
     from datakit import sources as _  # noqa: F401
 
 
@@ -32,17 +32,17 @@ def _infer_experiment_root(path: Path) -> Path:
     return path.parent
 
 
-def _load_source(path: Path, tag: str, version: str | None, *, defer_load: bool = False) -> None:
+def _load_source(path: Path, tag: str, *, defer_load: bool = False) -> None:
     _ensure_datasource_registry()
     experiment_root = _infer_experiment_root(path)
     experiment = ExperimentData(experiment_root, include_task_level=True)
     manifest = experiment.manifest
     inventory = experiment.data
 
-    source = DataSource.create_loader(tag, version=version)
+    source = get_source_class(tag)()
 
     def load() -> object:
-        return source.load(path)
+        return experiment.load_by_path(tag, path)
 
     loaded = None if defer_load else load()
 
@@ -60,7 +60,7 @@ def _load_source(path: Path, tag: str, version: str | None, *, defer_load: bool 
         namespace.update(
             {
                 "stream": loaded,
-                "data": loaded.data,
+                "data": loaded.value,
                 "timeline": loaded.t,
                 "meta": loaded.meta,
             }
@@ -86,11 +86,6 @@ def main() -> int:
     load_parser.add_argument("--path", required=True, type=Path, help="Path to the source file")
     load_parser.add_argument("--tag", required=True, help="DataSource tag to use")
     load_parser.add_argument(
-        "--version",
-        default=None,
-        help="Optional DataSource version (defaults to latest)",
-    )
-    load_parser.add_argument(
         "--defer-load",
         action="store_true",
         help="Open the shell without loading the file (use load() inside the session)",
@@ -102,7 +97,7 @@ def main() -> int:
         path = args.path
         if not path.exists() or not path.is_file():
             parser.error(f"--path must be an existing file: {path}")
-        _load_source(path, args.tag, args.version, defer_load=args.defer_load)
+        _load_source(path, args.tag, defer_load=args.defer_load)
         return 0
 
     parser.print_help()

@@ -1,14 +1,10 @@
-"""Utility primitives for declaring and discovering data sources.
-
-Each ``DataSource`` subclass registers itself, allowing discovery and loader
-pipelines to inspect available tags, versions, and declared patterns without
-maintaining parallel metadata structures.
-"""
+"""Base classes for loading datakit sources."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Dict, Iterable, Optional, Tuple
+from typing import Any, ClassVar, Dict, Iterable, Mapping, Optional
 
 import numpy as np
 import pandas as pd
@@ -17,162 +13,136 @@ from datakit.config import settings
 from ..datamodel import LoadedStream
 
 
-class DataSource:
-    """Shared contract for all file-backed loaders in ``datakit.sources``.
+@dataclass(frozen=True)
+class SourceContext:
+    """Context for a DataSource load call.
 
-    Subclasses only need to declare a ``tag`` and override :meth:`load`.  When
-    :meth:`load` returns a :class:`datakit.datamodel.LoadedStream`, the higher-
-    level pipeline gains access to both the parsed payload and metadata that
-    describes how the file relates to the experiment timeline.  The class also
-    manages automatic registration (respecting :mod:`datakit.config` settings)
-    and offers helper utilities for building typed streams with consistent
-    metadata decoration.
+    Provides quick access to sibling paths (e.g., dataqueue) based on the
+    inventory row for the same subject/session/task.
     """
-    
-    REGISTRY: ClassVar[Dict[str, Dict[str, type["DataSource"]]]] = {}
-    
-    # Subclasses must define these class variables
-    tag: ClassVar[str]                              # unique tag, e.g. "meso_metadata"
-    patterns: ClassVar[Iterable[str]]               # e.g. ("**/*_mesoscope.ome.tiff_frame_metadata.json",)
-    camera_tag: ClassVar[str | None] = None         # provider or binding camera tag
-    version: ClassVar[str] = settings.registry.default_version
-    is_timeseries: ClassVar[bool] = True            # whether this source produces a time-indexed stream
-    flatten_payload: ClassVar[bool] = True          # True → break into scalar/array columns
-    timeline_columns: ClassVar[Tuple[str, ...]] = ("time_elapsed_s", "time_s", "time", "t")
-    optional_time_columns: ClassVar[Tuple[str, ...]] = ()
 
-    def __init_subclass__(cls) -> None:
-        """Register subclasses automatically with version support."""
-        if not settings.registry.auto_register:
-            return
-        tag = getattr(cls, "tag", None)
-        patterns = getattr(cls, "patterns", None)
-        if not tag or not patterns:
-            return
+    subject: str
+    session: str
+    task: str | None
+    inventory_row: Mapping[str, str]
+    master_timeline: np.ndarray | None = None
+    experiment_window: tuple[float, float] | None = None
+    dataqueue_frame: pd.DataFrame | None = None
+    dataqueue_meta: Mapping[str, Any] | None = None
 
-        DataSource.REGISTRY.setdefault(tag, {})[cls.version] = cls
+    def path_for(self, tag: str) -> Path | None:
+        value = self.inventory_row.get(tag)
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except TypeError:
+            pass
+        return Path(str(value))
 
-    def load(self, path: Path) -> LoadedStream:
-        """Load data from the given path. Subclasses must implement this method."""
-        raise NotImplementedError(f"{self.__class__.__name__} must implement load() method")
+    def require_path(self, tag: str) -> Path:
+        path = self.path_for(tag)
+        if path is None:
+            raise FileNotFoundError(
+                f"Missing '{tag}' path for ({self.subject}, {self.session}, {self.task})"
+            )
+        return path
 
-    # ------------------------------------------------------------------
-    # Helper utilities for subclasses
-    # ------------------------------------------------------------------
-    def _create_stream(
-        self,
-        tag: str,
-        t: Iterable[float],
-        value: Any,
-        meta: Optional[Dict[str, Any]] = None,
-    ) -> LoadedStream:
-        """Utility to build a :class:`LoadedStream` with standard metadata decoration.
 
-        Subclasses that need to customize the metadata can pass in a ``meta`` dictionary.
-        This helper will ensure that fundamental fields like ``camera_tag`` and
-        ``is_timeseries`` are present, cast the timeline to ``float64``, and remember the
-        most recent stream for follow-up helpers that need it (e.g. frame index queries).
-        """
+class DataSource:
+    """Base class for a file-backed data source."""
 
+    tag: ClassVar[str]
+    patterns: ClassVar[Iterable[str]]
+    camera_tag: ClassVar[str | None] = None
+    is_timeseries: ClassVar[bool] = True
+    flatten_payload: ClassVar[bool] = True
+
+    def load(self, path: Path, *, context: SourceContext | None = None) -> LoadedStream:
+        """Load data from the given path."""
+        raise NotImplementedError(f"{self.__class__.__name__} must implement load()")
+
+    def _require_context(self, context: SourceContext | None) -> SourceContext:
+        if context is None:
+            raise ValueError(
+                f"{self.__class__.__name__} requires SourceContext; call through ExperimentData"
+            )
+        return context
+
+    def _decorate_meta(self, meta: Optional[Dict[str, Any]] = None, *, is_interval: bool = False) -> Dict[str, Any]:
         meta_dict: Dict[str, Any] = dict(meta or {})
-
         if self.camera_tag is not None:
-            meta_dict.setdefault(settings.registry.meta_camera_key, self.camera_tag)
-        meta_dict.setdefault(settings.registry.meta_timeseries_key, self.is_timeseries)
-        meta_dict.setdefault(settings.registry.meta_source_key, tag)
+            meta_dict.setdefault(settings.sources.meta_camera_key, self.camera_tag)
+        meta_dict.setdefault(settings.sources.meta_timeseries_key, self.is_timeseries)
+        meta_dict.setdefault(settings.sources.meta_source_key, self.tag)
+        if is_interval:
+            meta_dict.setdefault(settings.sources.meta_interval_key, True)
+        return meta_dict
 
-        timeline = np.asarray(list(t) if not isinstance(t, np.ndarray) else t, dtype=np.float64)
 
-        stream = LoadedStream(tag=tag, t=timeline, value=value, meta=meta_dict)
-        setattr(self, "_last_loaded_stream", stream)
-        return stream
+class TimeseriesSource(DataSource):
+    """Base class for time-indexed sources."""
 
-    def load_timeline(self, path: Path) -> tuple[np.ndarray, Dict[str, Any]]:
-        """Load only the timeline for a source, returning (timeline, info).
+    is_timeseries: ClassVar[bool] = True
 
-        Subclasses can override to avoid full payload loading.
-        The default implementation calls load() then extract_timeline().
-        """
+    def build_timeseries(
+        self,
+        path: Path,
+        *,
+        context: SourceContext | None = None,
+    ) -> tuple[np.ndarray, Any, Dict[str, Any]]:
+        """Return (timeline, value, meta)."""
+        raise NotImplementedError(f"{self.__class__.__name__} must implement build_timeseries()")
 
-        stream = self.load(path)
-        if not isinstance(stream, LoadedStream):
-            raise TypeError("load() did not return a LoadedStream")
-        return self.extract_timeline(stream)
+    def load(self, path: Path, *, context: SourceContext | None = None) -> LoadedStream:
+        t, value, meta = self.build_timeseries(path, context=context)
+        timeline = np.asarray(t, dtype=np.float64)
+        return LoadedStream(tag=self.tag, t=timeline, value=value, meta=self._decorate_meta(meta))
 
-    # ------------------------------------------------------------------
-    # Timeline helpers
-    # ------------------------------------------------------------------
-    @classmethod
-    def extract_timeline(cls, stream: LoadedStream) -> tuple[np.ndarray, Dict[str, Any]]:
-        """Return a best-effort timeline array and metadata about its source."""
 
-        if not isinstance(stream, LoadedStream):
-            raise TypeError("extract_timeline expects a LoadedStream")
+class TableSource(DataSource):
+    """Base class for static table sources."""
 
-        timeline = np.asarray(stream.t, dtype=np.float64)
-        info: Dict[str, Any] = {"source": "stream.t", "column": None}
+    is_timeseries: ClassVar[bool] = False
 
-        if isinstance(stream.value, pd.DataFrame):
-            candidates: list[str] = []
-            for name in cls.timeline_columns:
-                if name not in candidates:
-                    candidates.append(name)
-            for name in getattr(cls, "optional_time_columns", ()):  # type: ignore[truthy-bool]
-                if name not in candidates:
-                    candidates.append(name)
+    def build_table(
+        self,
+        path: Path,
+        *,
+        context: SourceContext | None = None,
+    ) -> tuple[np.ndarray, Any, Dict[str, Any]]:
+        """Return (timeline, value, meta)."""
+        raise NotImplementedError(f"{self.__class__.__name__} must implement build_table()")
 
-            for column in candidates:
-                if column in stream.value.columns:
-                    series = pd.to_numeric(stream.value[column], errors="coerce").dropna()
-                    if not series.empty:
-                        timeline = series.to_numpy(dtype=np.float64)
-                        info = {"source": "column", "column": column}
-                        break
+    def load(self, path: Path, *, context: SourceContext | None = None) -> LoadedStream:
+        t, value, meta = self.build_table(path, context=context)
+        timeline = np.asarray(t, dtype=np.float64)
+        return LoadedStream(tag=self.tag, t=timeline, value=value, meta=self._decorate_meta(meta))
 
-        return timeline, info
 
-    def get_timeline(self, path: Path) -> tuple[np.ndarray, Dict[str, Any]]:
-        """Load a source and return the extracted timeline and metadata."""
+class IntervalSeriesSource(DataSource):
+    """Base class for interval-based sources."""
 
-        return self.load_timeline(path)
-    
-    @classmethod
-    def get_registered_sources(cls) -> Dict[str, Dict[str, type["DataSource"]]]:
-        """Get all registered data source classes with versions."""
-        return cls.REGISTRY.copy()
-    
-    @classmethod
-    def get_available_versions(cls, tag: str) -> list[str]:
-        """Get available versions for a given tag."""
-        if tag not in cls.REGISTRY:
-            return []
-        return list(cls.REGISTRY[tag].keys())
-    
-    @classmethod
-    def get_latest_version(cls, tag: str) -> str:
-        """Get the latest version for a given tag (highest version number)."""
-        versions = cls.get_available_versions(tag)
-        if not versions:
-            raise ValueError(f"No versions found for tag: {tag}")
-        # Sort versions as strings for now (could implement semantic versioning later)
-        return sorted(versions)[-1]
-    
-    @classmethod
-    def create_loader(cls, tag: str, version: str | None = None) -> "DataSource":
-        """Create a loader instance for the given tag and version.
-        
-        Args:
-            tag: The data source tag
-            version: Specific version to use. If None, uses latest version.
-        """
-        if tag not in cls.REGISTRY:
-            raise ValueError(f"No loader registered for tag: {tag}")
-        
-        if version is None:
-            version = cls.get_latest_version(tag)
-        
-        if version not in cls.REGISTRY[tag]:
-            available = list(cls.REGISTRY[tag].keys())
-            raise ValueError(f"Version {version} not found for tag {tag}. Available versions: {available}")
-        
-        return cls.REGISTRY[tag][version]()
+    is_timeseries: ClassVar[bool] = True
+
+    def build_intervals(
+        self,
+        path: Path,
+        *,
+        context: SourceContext | None = None,
+    ) -> tuple[pd.DataFrame, Dict[str, Any]]:
+        """Return an intervals table with start/stop columns and meta."""
+        raise NotImplementedError(f"{self.__class__.__name__} must implement build_intervals()")
+
+    def load(self, path: Path, *, context: SourceContext | None = None) -> LoadedStream:
+        intervals, meta = self.build_intervals(path, context=context)
+        if "start_s" not in intervals.columns or "stop_s" not in intervals.columns:
+            raise ValueError("Intervals must include 'start_s' and 'stop_s' columns")
+        timeline = pd.to_numeric(intervals["start_s"], errors="coerce").to_numpy(dtype=np.float64)
+        return LoadedStream(
+            tag=self.tag,
+            t=timeline,
+            value=intervals,
+            meta=self._decorate_meta(meta, is_interval=True),
+        )

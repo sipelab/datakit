@@ -10,12 +10,11 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from datakit.sources.register import DataSource
-from datakit.datamodel import LoadedStream
+from datakit.sources.register import SourceContext, TimeseriesSource
 
 
-class MesoMeanSource(DataSource):
-    """Load a CSV of mean fluorescence values and compute dF/F traces.
+class MesoMeanSource(TimeseriesSource):
+    """Load mean fluorescence CSV and compute dF/F traces.
 
     The CSV is expected to contain at least ``Slice`` and ``Mean`` columns.  The
     loader derives a monotonically increasing ``time_elapsed_s`` column by
@@ -25,14 +24,17 @@ class MesoMeanSource(DataSource):
     tag = "meso_mean"
     patterns = ("**/*_meso-mean-trace.csv",)
     camera_tag = "meso_metadata"  # Bind to meso camera
-    version = "1.0"
-    timeline_columns = ("time_elapsed_s",)
     required_columns = ("Slice", "Mean")
     assumed_frame_rate_hz = 50.0
     normalization_baseline = "min"
     
-    def load(self, path: Path) -> LoadedStream:
-        """Read a mesoscope CSV and return a normalized stream."""
+    def build_timeseries(
+        self,
+        path: Path,
+        *,
+        context: SourceContext | None = None,
+    ) -> tuple[np.ndarray, pd.DataFrame, dict]:
+        """Read a mesoscope CSV and return a normalized table."""
         df = pd.read_csv(path)
         
         if not set(self.required_columns).issubset(df.columns):
@@ -50,12 +52,7 @@ class MesoMeanSource(DataSource):
         #normalize the Mean column using dF/F
         df['dF_F'] = self._dff_normalize(df[self.required_columns[1]])
         
-        return LoadedStream(
-            tag=self.tag,
-            t=t,
-            value=df,
-            meta={"source_file": str(path), "n_slices": len(df)}
-        )
+        return t, df, {"source_file": str(path), "n_slices": len(df)}
 
     def _dff_normalize(self, series: pd.Series) -> pd.Series:
         """Compute a simple dF/F normalization for the ``Mean`` column."""

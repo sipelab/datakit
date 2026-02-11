@@ -63,17 +63,16 @@ class TimelineSlice:
 		return result.reset_index(drop=True)
 
 
-class GlobalTimeline:
+class DataqueueIndex:
 	"""Cacheable facade over a session's dataqueue CSV.
 
 	The class deliberately avoids hard-coding knowledge of specific hardware.
 	Consumers supply selectors or parsing callbacks that describe which device
-	streams they are interested in. The timeline simply exposes common
-	utilities for retrieving filtered views and fitting time mappings onto the
-	shared derived clock.
+	streams they are interested in. The index exposes common utilities for
+	retrieving filtered views and fitting time mappings onto the shared clock.
 	"""
 
-	_cache: ClassVar[dict[Path, Optional["GlobalTimeline"]]] = {}
+	_cache: ClassVar[dict[Path, Optional["DataqueueIndex"]]] = {}
 
 	def __init__(self, directory: Path, dataqueue_path: Path, dataqueue: pd.DataFrame):
 		self._directory = directory
@@ -86,7 +85,7 @@ class GlobalTimeline:
 	# Construction helpers
 	# ------------------------------------------------------------------
 	@classmethod
-	def for_directory(cls, directory: Optional[Path]) -> Optional["GlobalTimeline"]:
+	def for_directory(cls, directory: Optional[Path]) -> Optional["DataqueueIndex"]:
 		if directory is None:
 			return None
 
@@ -104,18 +103,26 @@ class GlobalTimeline:
 			cls._cache[resolved] = None
 			return None
 
-		timeline = cls(resolved, dq_path, frame)
-		cls._cache[resolved] = timeline
+		index = cls(resolved, dq_path, frame)
+		cls._cache[resolved] = index
 		logger.debug(
-			"GlobalTimeline initialised",
+			"DataqueueIndex initialised",
 			extra={
-				"phase": "global_timeline_init",
+				"phase": "dataqueue_index_init",
 				"directory": str(resolved),
 				"dataqueue": str(dq_path),
 				"rows": int(len(frame)),
 			},
 		)
-		return timeline
+		return index
+
+	@classmethod
+	def from_path(cls, dataqueue_path: Path) -> "DataqueueIndex":
+		resolved = Path(dataqueue_path).resolve()
+		frame = cls._load_dataqueue(resolved)
+		if frame is None or frame.empty:
+			raise FileNotFoundError(f"DataqueueIndex: no readable dataqueue at {resolved}")
+		return cls(resolved.parent, resolved, frame)
 
 	@staticmethod
 	def _find_dataqueue(directory: Path) -> Optional[Path]:
@@ -128,16 +135,16 @@ class GlobalTimeline:
 			frame = pd.read_csv(path, low_memory=False)
 		except Exception as exc:  # pragma: no cover - defensive
 			logger.warning(
-				"GlobalTimeline: failed to read dataqueue",
-				extra={"phase": "global_timeline_load", "path": str(path), "error": repr(exc)},
+				"DataqueueIndex: failed to read dataqueue",
+				extra={"phase": "dataqueue_index_load", "path": str(path), "error": repr(exc)},
 			)
 			return None
 
 		queue_col = settings.timeline.queue_column
 		if queue_col not in frame.columns:
 			logger.warning(
-				"GlobalTimeline: dataqueue missing queue_elapsed column",
-				extra={"phase": "global_timeline_load", "path": str(path)},
+				"DataqueueIndex: dataqueue missing queue_elapsed column",
+				extra={"phase": "dataqueue_index_load", "path": str(path)},
 			)
 			return None
 

@@ -1,16 +1,8 @@
-"""
-DataKit data source implementations organized by category.
+"""Explicit registry of datakit data sources."""
 
-This module contains all data source implementations that can load various
-types of experimental data. Data sources are automatically registered with
-the DataSource registry and support versioning.
-"""
-
-# Import all data sources to ensure they register with the DataSource registry
 from .camera.mesoscope import MesoMetadataSource
 from .camera.pupil import PupilMetadataSource
-from .camera.suite2p import Suite2p
-from .camera.suite2pV2 import Suite2pV2
+from .camera.suite2p import Suite2pV2
 from .behavior.treadmill import TreadmillSource
 from .behavior.dataqueue import DataqueueSource
 from .behavior.wheel import WheelEncoder
@@ -21,11 +13,39 @@ from .analysis.pupil import PupilDLCSource
 from .session.config import SessionConfigSource
 from .session.notes import SessionNotesSource
 from .session.timestamps import SessionTimestampsSource
+from .register import DataSource
+
+SOURCE_REGISTRY: dict[str, type[DataSource]] = {
+    "meso_metadata": MesoMetadataSource,
+    "pupil_metadata": PupilMetadataSource,
+    "suite2p": Suite2pV2,
+    "treadmill": TreadmillSource,
+    "dataqueue": DataqueueSource,
+    "wheel": WheelEncoder,
+    "psychopy": Psychopy,
+    "meso_mean": MesoMeanSource,
+    "mesomap": MesoMapSource,
+    "pupil_dlc": PupilDLCSource,
+    "session_config": SessionConfigSource,
+    "notes": SessionNotesSource,
+    "timestamps": SessionTimestampsSource,
+}
+
+
+def get_source_class(tag: str) -> type[DataSource]:
+    """Return the source class for a tag."""
+    if tag not in SOURCE_REGISTRY:
+        raise KeyError(f"No source registered for tag '{tag}'")
+    return SOURCE_REGISTRY[tag]
+
+
+def available_tags() -> tuple[str, ...]:
+    """Return registered source tags in sorted order."""
+    return tuple(sorted(SOURCE_REGISTRY.keys()))
 
 __all__ = [
     "MesoMetadataSource",
     "PupilMetadataSource",
-    "Suite2p",
     "Suite2pV2",
     "TreadmillSource",
     "DataqueueSource",
@@ -37,4 +57,7 @@ __all__ = [
     "SessionConfigSource",
     "SessionNotesSource",
     "SessionTimestampsSource",
+    "SOURCE_REGISTRY",
+    "get_source_class",
+    "available_tags",
 ]

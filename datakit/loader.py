@@ -26,41 +26,35 @@ from ._utils._logger import get_logger
 from datakit.config import settings
 from datakit.datamodel import LoadedStream
 from datakit.inventory import build_inventory
-from datakit.sources.register import DataSource
+from datakit.sources.behavior.dataqueue import DataqueueSource
+from datakit.sources import get_source_class
+from datakit.sources.register import SourceContext
 
 logger = get_logger(__name__)
 
 
-LoaderFn = Callable[[str], object]
+LoaderFn = Callable[[str, SourceContext], object]
 
 
 def _ensure_datasource_registry() -> None:
-    # Importing datakit.sources ensures all DataSource subclasses register with the registry.
+    """Import datakit sources so the registry module is initialized."""
     from datakit import sources as _  # noqa: F401
 
 
-def _source_class(tag: str, version: str | None = None) -> type[DataSource]:
-    registry = DataSource.get_registered_sources()
-    if tag not in registry:
-        raise KeyError(f"No data source registered for tag '{tag}'")
-    if version is None:
-        version = DataSource.get_latest_version(tag)
-    if version not in registry[tag]:
-        available = list(registry[tag].keys())
-        raise KeyError(f"Version '{version}' not registered for tag '{tag}'. Available: {available}")
-    return registry[tag][version]
+def _source_class(tag: str):
+    return get_source_class(tag)
 
 
-def _make_loader(tag: str, version: str | None = None) -> LoaderFn:
-    def load(path_str: str) -> object:
-        source = DataSource.create_loader(tag, version=version)
-        return source.load(Path(path_str))
+def _make_loader(tag: str) -> LoaderFn:
+    def load(path_str: str, context: SourceContext) -> object:
+        source = get_source_class(tag)()
+        return source.load(Path(path_str), context=context)
 
     return load
 
 
-def _structured_default(tag: str, version: str | None = None) -> bool:
-    cls = _source_class(tag, version=version)
+def _structured_default(tag: str) -> bool:
+    cls = _source_class(tag)
     return not getattr(cls, "flatten_payload", True)
 
 
@@ -118,6 +112,7 @@ class ExperimentStore:
         self.inventory.index.set_names(index_names, inplace=True)
         self._specs = []
         self._materialized = None
+        self._master_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.meta_frame = pd.DataFrame(columns=self._meta_columns())
         self.session_attrs = {}
         self.experiment_attrs = {}
@@ -149,13 +144,12 @@ class ExperimentStore:
         tag: str,
         files: pd.Series,
         *,
-        version: str | None = None,
         logical_name: str | None = None,
         structured: bool | None = None,
     ) -> None:
         if structured is None:
-            structured = _structured_default(tag, version=version)
-        loader = _make_loader(tag, version=version)
+            structured = _structured_default(tag)
+        loader = _make_loader(tag)
         logical_overrides = settings.dataset.logical_name_overrides
         resolved_name = logical_name or logical_overrides.get(tag, tag)
         self.register_series(resolved_name, files, loader, structured=structured)
@@ -164,10 +158,8 @@ class ExperimentStore:
         self,
         tags: Iterable[str],
         *,
-        versions: Dict[str, str] | None = None,
         logical_name_overrides: Dict[str, str] | None = None,
     ) -> list[str]:
-        overrides = versions or {}
         name_overrides = logical_name_overrides or settings.dataset.logical_name_overrides
         missing: list[str] = []
         for tag in tags:
@@ -178,7 +170,6 @@ class ExperimentStore:
             self.register_source(
                 tag,
                 self.inventory[tag],
-                version=overrides.get(tag),
                 logical_name=logical_name,
             )
         return missing
@@ -227,10 +218,22 @@ class ExperimentStore:
     ) -> tuple[dict, Dict[str, Any] | None]:
         if pd.isna(path):
             return {}, None
+        subject, session, task = idx
+        inventory_row = self.inventory.loc[idx].to_dict()
+        master = self._ensure_master_timeline(idx, inventory_row)
+        context = SourceContext(
+            subject=subject,
+            session=session,
+            task=task,
+            inventory_row=inventory_row,
+            master_timeline=master.get("master_timeline"),
+            experiment_window=master.get("experiment_window"),
+            dataqueue_frame=master.get("dataqueue_frame"),
+            dataqueue_meta=master.get("dataqueue_meta"),
+        )
         try:
-            data = spec.loader(path)
+            data = spec.loader(path, context)
         except Exception as exc:
-            subject, session, task = idx
             context = (
                 f"Error loading source '{spec.name}' for "
                 f"({subject}, {session}, {task}) at '{path}'. "
@@ -259,6 +262,58 @@ class ExperimentStore:
         if isinstance(data, (np.ndarray, list)):
             return {(spec.name, "values"): np.asarray(data)}, None
         return {(spec.name, "value"): data}, None
+
+    def _ensure_master_timeline(
+        self,
+        idx: Tuple[str, str, str],
+        inventory_row: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if idx in self._master_cache:
+            return self._master_cache[idx]
+
+        dataqueue_path = inventory_row.get("dataqueue")
+        if dataqueue_path is None or (isinstance(dataqueue_path, float) and pd.isna(dataqueue_path)):
+            cached = {
+                "master_timeline": None,
+                "experiment_window": None,
+                "dataqueue_frame": None,
+                "dataqueue_meta": None,
+            }
+            self._master_cache[idx] = cached
+            return cached
+
+        dq_path = Path(str(dataqueue_path))
+        dq_source = DataqueueSource()
+        master_timeline, frame, meta = dq_source.build_timeseries(dq_path)
+        experiment_window = self._resolve_experiment_window(frame)
+        cached = {
+            "master_timeline": master_timeline,
+            "experiment_window": experiment_window,
+            "dataqueue_frame": frame,
+            "dataqueue_meta": meta,
+        }
+        self._master_cache[idx] = cached
+        return cached
+
+    def _resolve_experiment_window(self, frame: pd.DataFrame) -> tuple[float, float] | None:
+        device_col = "device_id"
+        time_col = settings.timeline.queue_column
+        if device_col not in frame.columns or time_col not in frame.columns:
+            return None
+
+        patterns = settings.timeline.window_device_patterns
+        device_series = frame[device_col].astype(str)
+        mask = pd.Series(False, index=frame.index)
+        for pattern in patterns:
+            mask |= device_series.str.contains(pattern, case=False, na=False, regex=False)
+
+        if not mask.any():
+            return None
+
+        times = pd.to_numeric(frame.loc[mask, time_col], errors="coerce").dropna()
+        if times.empty:
+            return None
+        return float(times.iloc[0]), float(times.iloc[-1])
 
     def _load_file(self, path: str, spec: SeriesSpec, idx: Tuple[str, str, str]) -> dict:
         data, meta = self._load_file_result(path, spec, idx)
@@ -489,7 +544,6 @@ def build_default_dataset(
     output_path: Optional[Path] = None,
     sources: Iterable[DefaultSource] | None = DEFAULT_SOURCES,
     tags: Iterable[str] | None = None,
-    versions: Dict[str, str] | None = None,
 ) -> Path:
     """Replicate the classic experiment build using the minimalist loader."""
 
@@ -499,7 +553,7 @@ def build_default_dataset(
     missing_columns: list[str] = []
 
     if tags is not None:
-        missing_columns = store.register_sources(tags, versions=versions)
+        missing_columns = store.register_sources(tags)
     elif sources is not None:
         for src in sources:
             if src.tag in base_inventory.columns:
@@ -510,7 +564,7 @@ def build_default_dataset(
 
             store.register_series(src.logical_name, series, loader=src.loader, structured=src.structured)
     else:
-        missing_columns = store.register_sources(settings.dataset.desired_tags, versions=versions)
+        missing_columns = store.register_sources(settings.dataset.desired_tags)
 
     if missing_columns:
         logger.warning(

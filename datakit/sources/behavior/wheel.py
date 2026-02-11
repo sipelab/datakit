@@ -11,9 +11,8 @@ import pandas as pd
 
 from ..._utils._logger import get_logger
 
-from datakit.sources.register import DataSource
-from datakit.datamodel import LoadedStream
-from datakit.timeline import GlobalTimeline
+from datakit.sources.register import SourceContext, TimeseriesSource
+from datakit.timeline import DataqueueIndex
 
 logger = get_logger(__name__)
 
@@ -29,7 +28,7 @@ class _WheelSummary:
     stop_ts: Optional[str]
 
 
-class WheelEncoder(DataSource):
+class WheelEncoder(TimeseriesSource):
     """Load wheel encoder streams recorded alongside nidaq pulses.
 
     The raw CSV emitted by the behavioral rig contains incremental click counts,
@@ -42,8 +41,6 @@ class WheelEncoder(DataSource):
     tag = "wheel"
     patterns = ("**/*_wheel.csv",)
     camera_tag = None  # Not bound to camera
-    version = "2.0"
-    timeline_columns = ("time_elapsed_s", "time_reference_s")
 
     required_columns = ("Clicks", "Time", "Speed")
     time_column = "Time"
@@ -60,8 +57,13 @@ class WheelEncoder(DataSource):
     distance_integration_method = "trapezoid"
     absolute_device_id = "encoder"
     alignment_origin_device_id = "ThorCam"
-
-    def load(self, path: Path) -> LoadedStream:
+    def build_timeseries(
+        self,
+        path: Path,
+        *,
+        context: SourceContext | None = None,
+    ) -> tuple[np.ndarray, pd.DataFrame, dict]:
+        context = self._require_context(context)
         raw = pd.read_csv(path)
 
         if not set(self.required_columns).issubset(raw.columns):
@@ -70,26 +72,23 @@ class WheelEncoder(DataSource):
             )
 
         df = self._prepare_frame(raw)
-        df_aligned, alignment_meta = self._align_to_dataqueue(df, path.parent)
+        df_aligned, alignment_meta = self._align_to_dataqueue(df, context)
         summary = self._summarize(df_aligned, raw)
         df_aligned = df_aligned.rename(columns={"time_s": "time_elapsed_s", "time_raw_s": "time_reference_s"})
 
-        return LoadedStream(
-            tag=self.tag,
-            t=df_aligned["time_elapsed_s"].to_numpy(dtype=np.float64),
-            value=df_aligned,
-            meta={
-                "source_file": str(path),
-                "n_samples": int(len(df_aligned)),
-                "start_time": summary.start_ts,
-                "stop_time": summary.stop_ts,
-                "duration_s": summary.duration_s,
-                "total_distance_mm": summary.total_distance_mm,
-                "total_click_delta": summary.total_click_delta,
-                "source_method": "wheel_csv_v2",
-                **alignment_meta,
-            },
-        )
+        meta = {
+            "source_file": str(path),
+            "n_samples": int(len(df_aligned)),
+            "start_time": summary.start_ts,
+            "stop_time": summary.stop_ts,
+            "duration_s": summary.duration_s,
+            "total_distance_mm": summary.total_distance_mm,
+            "total_click_delta": summary.total_click_delta,
+            "source_method": "wheel_csv_v2",
+            **alignment_meta,
+        }
+
+        return df_aligned["time_elapsed_s"].to_numpy(dtype=np.float64), df_aligned, meta
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -110,8 +109,7 @@ class WheelEncoder(DataSource):
                 "time_s": [0.0, 0.0],
                 "click_delta": [0, 0],
                 "speed_mm": [0.0, 0.0],
-            }
-            )
+            })
 
         # Ensure speed/clicks missing entries become zeros
         frame["click_delta"] = frame["click_delta"].fillna(0)
@@ -159,16 +157,28 @@ class WheelEncoder(DataSource):
     # ------------------------------------------------------------------
     # Alignment helpers
     # ------------------------------------------------------------------
-    def _align_to_dataqueue(self, frame: pd.DataFrame, directory: Path) -> tuple[pd.DataFrame, dict]:
+    def _align_to_dataqueue(self, frame: pd.DataFrame, context: SourceContext) -> tuple[pd.DataFrame, dict]:
         """Map wheel timestamps onto the nidaq master clock via dataqueue anchors."""
-        timeline = GlobalTimeline.for_directory(directory)
-        if timeline is None:
-            raise FileNotFoundError("WheelEncoder: dataqueue file not found for alignment")
+        dq_path = context.path_for("dataqueue")
+        dataqueue_file = str(dq_path) if dq_path is not None else None
+        timeline = None
 
-        encoder_slice = timeline.slice(
-            lambda ids: ids.str.contains(self.anchor_filter_pattern, case=False, na=False, regex=False)
-        )
-        encoder_times = encoder_slice.queue_elapsed().to_numpy(dtype=np.float64)
+        if context.dataqueue_frame is not None:
+            encoder_times = self._extract_times(context.dataqueue_frame, self.anchor_filter_pattern)
+            origin_times = self._extract_times(context.dataqueue_frame, self.alignment_origin_device_id)
+        else:
+            if dq_path is None:
+                raise FileNotFoundError("WheelEncoder: dataqueue path not available")
+            timeline = DataqueueIndex.from_path(dq_path)
+            encoder_slice = timeline.slice(
+                lambda ids: ids.str.contains(self.anchor_filter_pattern, case=False, na=False, regex=False)
+            )
+            encoder_times = encoder_slice.queue_elapsed().to_numpy(dtype=np.float64)
+            origin_slice = timeline.slice(
+                lambda ids: ids.str.contains(self.alignment_origin_device_id, case=False, na=False, regex=False)
+            )
+            origin_times = origin_slice.queue_elapsed().to_numpy(dtype=np.float64)
+            dataqueue_file = str(timeline.source_path)
         if encoder_times.size < 2:
             logger.warning(
                 "WheelEncoder: insufficient encoder anchors (%d). "
@@ -177,18 +187,25 @@ class WheelEncoder(DataSource):
             )
             return frame.copy(), {
                 "time_basis": self.alignment_time_basis_wheel,
-                "dataqueue_file": str(timeline.source_path),
+                "dataqueue_file": dataqueue_file,
                 "dataqueue_alignment": "insufficient_anchors",
                 "dataqueue_anchors": int(encoder_times.size),
                 "alignment_device": self.anchor_filter_pattern,
             }
-
-        origin_slice = timeline.slice(
-            lambda ids: ids.str.contains(self.alignment_origin_device_id, case=False, na=False, regex=False)
-        )
-        origin_times = origin_slice.queue_elapsed().to_numpy(dtype=np.float64)
         if origin_times.size == 0:
-            raise ValueError("WheelEncoder: ThorCam anchors missing for alignment")
+            logger.warning(
+                "WheelEncoder: %s anchors missing for alignment. "
+                "Returning unaligned wheel timeline.",
+                self.alignment_origin_device_id,
+            )
+            return frame.copy(), {
+                "time_basis": self.alignment_time_basis_wheel,
+                "dataqueue_file": dataqueue_file,
+                "dataqueue_alignment": "missing_origin_anchors",
+                "dataqueue_anchors": int(encoder_times.size),
+                "alignment_device": self.anchor_filter_pattern,
+                "alignment_origin_device": self.alignment_origin_device_id,
+            }
 
         n_samples = len(frame)
         n_anchors = int(encoder_times.size)
@@ -208,7 +225,10 @@ class WheelEncoder(DataSource):
         encoder_start = float(encoder_times[0])
         origin_offset = encoder_start - origin
 
-        elapsed_abs = timeline.absolute_for_device(self.absolute_device_id)
+        if timeline is not None:
+            elapsed_abs = timeline.absolute_for_device(self.absolute_device_id)
+        else:
+            elapsed_abs = None
         if elapsed_abs:
             elapsed, absolute = elapsed_abs
             elapsed = elapsed + origin_offset
@@ -220,7 +240,7 @@ class WheelEncoder(DataSource):
 
         return aligned, {
             "time_basis": self.alignment_time_basis_dataqueue,
-            "dataqueue_file": str(timeline.source_path),
+            "dataqueue_file": dataqueue_file,
             "dataqueue_alignment": method,
             "dataqueue_anchors": n_anchors,
             "alignment_device": self.anchor_filter_pattern,
@@ -228,6 +248,14 @@ class WheelEncoder(DataSource):
             "alignment_origin_queue_elapsed": origin,
             "alignment_origin_offset": float(origin_offset),
         }
+
+    def _extract_times(self, frame: pd.DataFrame, pattern: str) -> np.ndarray:
+        if self.queue_elapsed_column not in frame.columns or "device_id" not in frame.columns:
+            return np.array([], dtype=np.float64)
+        device_series = frame["device_id"].astype(str)
+        mask = device_series.str.contains(pattern, case=False, na=False, regex=False)
+        times = pd.to_numeric(frame.loc[mask, self.queue_elapsed_column], errors="coerce").dropna()
+        return times.to_numpy(dtype=np.float64)
 
     @staticmethod
     def _extract_timestamp(series: Optional[pd.Series]) -> Optional[str]:

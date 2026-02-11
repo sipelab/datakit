@@ -6,26 +6,22 @@ It is commonly used to align per-device clocks (treadmill, cameras, nidaq) by
 extracting anchor pairs for downstream timeline fitting.
 """
 
-from typing import Optional, Iterable
+from typing import Optional
 import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from datakit.sources.register import DataSource
-from datakit.datamodel import LoadedStream
+from datakit.sources.register import SourceContext, TimeseriesSource
 
 
-class DataqueueSource(DataSource):
-    """Load the ubiquitous dataqueue CSV and expose alignment metadata."""
+class DataqueueSource(TimeseriesSource):
+    """Load the dataqueue CSV as a time-indexed table."""
     tag = "dataqueue"
     patterns = ("**/*_dataqueue.csv",)
     camera_tag = None
-    version = "1.1"
-    timeline_columns = ("master_elapsed_s", "queue_elapsed")
     time_column = "queue_elapsed"
     device_id_column = "device_id"
     device_timestamp_column = "device_ts"
-    optional_time_columns = ("queue_elapsed",)
     payload_column = "payload"
     master_device_priority: tuple[str, ...] = ("dhyana", "mesoscope")
     device_alias_patterns: tuple[tuple[str, str], ...] = (
@@ -34,8 +30,13 @@ class DataqueueSource(DataSource):
         ("thorcam", "pupil"),
     )
     
-    def load(self, path: Path) -> LoadedStream:
-        """Read ``*_dataqueue.csv`` and derive alignment helpers."""
+    def build_timeseries(
+        self,
+        path: Path,
+        *,
+        context: SourceContext | None = None,
+    ) -> tuple[np.ndarray, pd.DataFrame, dict]:
+        """Read ``*_dataqueue.csv`` and return a time-indexed table."""
         raw = pd.read_csv(path, low_memory=False)
 
         if self.time_column not in raw.columns:
@@ -57,43 +58,34 @@ class DataqueueSource(DataSource):
         device_elapsed = self._build_device_elapsed(raw, queue_start)
         device_ts = self._build_device_ts(raw)
         device_aliases = self._build_device_aliases(raw)
-
         affine = self._fit_master_affine(raw, master_id, queue_start)
         device_aligned = self._apply_affine(device_elapsed, affine)
 
-        payload_array = raw.get(self.payload_column)
-        payload_values: Iterable[object]
-        if payload_array is not None:
-            payload_values = payload_array.to_numpy()
-        else:
-            payload_values = np.array([], dtype=object)
-
-        # Single-row summary so the dataset stores dicts/arrays directly in the cells
-        summary = pd.DataFrame(
-            {
-                self.time_column: [t.astype(np.float64)],
-                f"{self.device_timestamp_column}_raw": [raw.get(self.device_timestamp_column, pd.Series(dtype=object)).to_numpy()],
-                self.device_id_column: [raw.get(self.device_id_column, pd.Series(dtype=object)).astype(str).fillna("").to_numpy()],
-                self.payload_column: [payload_values],
-                "master_device_id": [master_id],
-                "master_elapsed_s": [master_elapsed.astype(np.float64)],
-                "device_ts": [device_ts],
-                "device_elapsed": [device_elapsed],
-                "device_aligned_abs": [device_aligned],
-                "device_sample_rate_hz": [self._estimate_device_rates(device_elapsed)],
-                "device_aliases": [device_aliases],
-                "affine": [affine],
-            }
-        )
+        frame = raw.copy()
+        frame["time_elapsed_s"] = t.astype(np.float64)
+        if self.device_id_column in frame.columns:
+            per_device_start = (
+                frame.groupby(self.device_id_column)[self.time_column]
+                .transform("min")
+                .astype(np.float64)
+            )
+            frame["device_elapsed_s"] = pd.to_numeric(frame[self.time_column], errors="coerce") - per_device_start
 
         meta = {
             "source_file": str(path),
             "n_entries": len(raw),
             "master_device_id": master_id,
-            "time_basis": master_id,
+            "master_elapsed": master_elapsed.astype(np.float64),
+            "device_ts": device_ts,
+            "device_elapsed": device_elapsed,
+            "device_aligned_abs": device_aligned,
+            "device_sample_rate_hz": self._estimate_device_rates(device_elapsed),
+            "device_aliases": device_aliases,
+            "affine": affine,
+            "time_basis": self.time_column,
         }
 
-        return LoadedStream(tag=self.tag, t=master_elapsed.astype(np.float64), value=summary, meta=meta)
+        return t.astype(np.float64), frame, meta
 
     def _select_master_device(self, df: pd.DataFrame) -> str:
         """Pick the device used as the master time basis."""
@@ -113,7 +105,7 @@ class DataqueueSource(DataSource):
         return "master"
 
     def _master_elapsed(self, df: pd.DataFrame, master_id: str, queue_start: float) -> np.ndarray:
-        """Return elapsed seconds for the master device relative to queue start."""
+        """Return elapsed seconds for the master device."""
 
         device_series = df.get(self.device_id_column)
         if device_series is None:
@@ -128,7 +120,8 @@ class DataqueueSource(DataSource):
         if master_queue.empty:
             return np.array([], dtype=np.float64)
 
-        return master_queue.to_numpy(dtype=np.float64) - float(queue_start)
+        master_queue = master_queue - float(master_queue.iloc[0])
+        return master_queue.to_numpy(dtype=np.float64)
 
     def _estimate_rate(self, timeline: np.ndarray) -> float:
         if timeline.size < 2:
