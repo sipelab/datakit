@@ -20,6 +20,17 @@ suite2p_block = dataset.suite2p
 
 Both approaches return another DataFrame where the columns correspond to the features emitted by the source.
 
+## Source naming
+
+Dataset column labels use logical names that can differ from source tags. The
+default mapping is defined in `settings.dataset.logical_name_overrides`:
+
+- `dataqueue` -> `time`
+- `wheel` -> `encoder`
+- `pupil_dlc` -> `pupil`
+- `meso_metadata` -> `meso_meta`
+- `pupil_metadata` -> `pupil_meta`
+
 ## Index expectations
 
 The `dataset.index` always carries three named levels (`Subject`, `Session`, `Task`). Typical access patterns include:
@@ -41,46 +52,40 @@ The table below lists the primary sources produced by `DEFAULT_SOURCES` together
 
 | Source | Feature | Sample value type |
 | --- | --- | --- |
-| `timestamps` | `raw_output` | `pandas.DataFrame` (frame metadata) |
-| `dataqueue` | `queue_elapsed` | `numpy.ndarray` |
-|  | `packet_ts` | `numpy.ndarray` |
-|  | `device_ts` | `numpy.ndarray` |
-|  | `device_id` | `numpy.ndarray` |
-|  | `payload` | `numpy.ndarray` |
-| `encoder` | `time_s` | `numpy.ndarray` |
-|  | `time_raw_s` | `numpy.ndarray` |
-|  | `click_delta` | `numpy.ndarray` |
-|  | `click_position` | `numpy.ndarray` |
-|  | `speed_mm` | `numpy.ndarray` |
-|  | `distance_mm` | `numpy.ndarray` |
-|  | `time_basis` | `numpy.ndarray` |
-| `notes` | `timestamp` | `numpy.ndarray` (UTC timestamps) |
-|  | `note` | `numpy.ndarray` (strings) |
-| `psychopy` | `('trials', '...')` columns | `list` of scalar values (one per trial) |
-|  | `('epochs', '...')` columns | `list` of timestamps (epoch on/off pairs) |
-|  | `('analysis', '...')` columns | `list` of derived timing offsets |
-| `pupil_dlc` | `pupil_diameter_mm` | `numpy.ndarray` |
-| `pupil_meta` | `runner_time_ms`, `exposure_ms`, `mda_event`, `Camera`, `ElapsedTime-ms`, `Height`, `ImageNumber`, `TimeReceivedByCore`, `Width` | `numpy.ndarray` |
-| `session_config` | `raw_output` | `pandas.DataFrame` |
+| `meso_mean` | `Slice`, `Mean`, `time_elapsed_s`, `dF_F` | `numpy.ndarray` |
+| `mesomap` | ROI columns from the traces CSV, plus `time_elapsed_s` | `numpy.ndarray` |
+| `timestamps` | `device_id`, `started`, `stopped`, `start_s`, `stop_s` | `numpy.ndarray` |
+| `time` | `queue_elapsed`, `packet_ts`, `device_ts`, `device_id`, `payload`, `time_elapsed_s`, `device_elapsed_s` (if available) | `numpy.ndarray` |
+| `treadmill` | `timestamp`, `distance_mm`, `speed_mm`, `time_elapsed_s` (plus passthrough columns) | `numpy.ndarray` |
+| `encoder` | `time_elapsed_s`, `time_reference_s`, `click_delta`, `click_position`, `speed_mm`, `distance_mm`, `time_absolute` (optional) | `numpy.ndarray` |
+| `notes` | `raw_output` | `pandas.DataFrame` |
+| `session_config` | Parameter columns from the configuration CSV | scalar values (`str`, `float`, `int`, etc.) |
+| `meso_meta` | `raw_output` | `pandas.DataFrame` |
+| `pupil_meta` | `raw_output` | `pandas.DataFrame` |
+| `pupil` | `pupil_diameter_mm`, `time_elapsed_s` | `numpy.ndarray` |
 | `suite2p` | `cell_identifier` | `numpy.ndarray` (nROIs × 2 columns: accepted flag & original ROI index) |
-|  | `spike_rate` | `numpy.ndarray` (cells × frames) |
 |  | `stat` | `list` of ROI metadata dicts |
 |  | `ops` | `dict` (Suite2p ops configuration) |
 |  | `plane_directory` | `str` |
 |  | `cell_mask` | `numpy.ndarray` (boolean mask of accepted cells) |
 |  | `roi_fluorescence` | `numpy.ndarray` (cells × frames) |
 |  | `neuropil_fluorescence` | `numpy.ndarray` (cells × frames) |
-|  | `deltaf_f` | `numpy.ndarray` (ΔF/F per cell) |
-|  | `interp_deltaf_f` | `numpy.ndarray` (ΔF/F resampled to 10 Hz) |
-|  | `smoothed_dff` | `numpy.ndarray` (moving-average ΔF/F) |
-|  | `interpolation_method` | `str` (`"cubic_spline"`, `"linear"`, or `"unavailable"`) |
-|  | `mean_fluo_dff` | `numpy.ndarray` (population-average ΔF/F trace) |
-|  | `peaks_prominence` | `numpy.ndarray` (indices of prominent peaks) |
-|  | `num_peaks_prominence` | `int` |
+|  | `deltaf_f` | `numpy.ndarray` (dF/F per cell) |
 |  | `time_native_s` | `numpy.ndarray` (native frame times) |
-|  | `time_elapsed_s` | `numpy.ndarray` (10 Hz timeline) |
+|  | `time_elapsed_s` | `numpy.ndarray` (aligned frame times) |
 
-> **Note:** All timeseries sources expose a `time_elapsed_s` feature representing seconds since acquisition start. Optional absolute timestamps appear under `time_absolute` when the origin device records wall-clock time.
+> **Note:** Most timeseries sources include `time_elapsed_s` seconds since acquisition start. Interval sources (like `timestamps`) use `start_s`/`stop_s`. Some sources add `time_absolute` when wall-clock timestamps are available.
+
+## Metadata columns
+
+Every loader can emit metadata via the `meta` dictionary. During materialization,
+metadata is added as extra columns under the same `Source` using two patterns:
+
+- `meta.<key>` columns for individual metadata keys
+- `meta` column containing a dict of all metadata for that source
+
+Session-scoped metadata (e.g., from `mesomap` or `session_config`) is stored once
+per subject/session instead of once per task.
 
 ## Working with feature values
 
