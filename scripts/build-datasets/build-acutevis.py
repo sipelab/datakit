@@ -33,10 +33,9 @@ PIPELINE_TAGS = (
 etoH_root = Path(r"G:\Projects\ACUTEVIS").resolve()
 etoH_experiment = ExperimentData(etoH_root, include_task_level=True)
 sliced_inventory = etoH_experiment.data.drop(index=[('ACUTEVIS15','ses-02','task-gratings')])
-#sliced_inventory = select_inventory_entry(sliced_inventory, subject="ACUTEVIS06", session="ses-02", task="task-movies")
 store = ExperimentStore(sliced_inventory)
 store.register_sources(PIPELINE_TAGS)
 
 dataset = store.materialize(progress=True)
 
-dataset.to_pickle(etoH_root / "pickle jar" / "260211_ACUTEVIS_dataset.pkl")
+dataset.to_pickle(etoH_root / "picklejar" / "260211_ACUTEVIS_dataset.pkl")

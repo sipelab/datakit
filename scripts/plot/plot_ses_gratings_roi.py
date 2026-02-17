@@ -20,7 +20,9 @@ from datakit.loader import ExperimentStore
 
 def _task_level_name(frame: pd.DataFrame) -> str:
     if isinstance(frame.index, pd.MultiIndex) and frame.index.names:
-        return frame.index.names[2]
+        name = frame.index.names[2]
+        if name is not None:
+            return str(name)
     return settings.dataset.index_names[2]
 
 
@@ -178,7 +180,6 @@ PIPELINE_TAGS = (
     "suite2p",
 )
 
-PIPELINE_VERSIONS = {"psychopy": "3.1", "suite2p": "2.1"}
 
 # ─── Plot Defaults (global params) ────────────────────────────────────────────
 PLOT_SOURCE = "suite2p"
@@ -224,7 +225,7 @@ sliced_inventory = slice_inventory(etoH_experiment.data, PLOT_INVENTORY_SLICE)
 #     task=TASK,
 # )
 store = ExperimentStore(sliced_inventory)
-store.register_sources(PIPELINE_TAGS, versions=PIPELINE_VERSIONS)
+store.register_sources(PIPELINE_TAGS)
 
 dataset = store.materialize(progress=True)
 

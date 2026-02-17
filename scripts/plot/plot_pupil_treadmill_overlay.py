@@ -46,7 +46,7 @@ def main() -> None:
     inventory = _select_inventory_entry(experiment.data, subject, session, task)
 
     store = ExperimentStore(inventory)
-    missing = store.register_sources(("treadmill", "pupil_dlc"), versions={"treadmill": "2.1"})
+    missing = store.register_sources(("treadmill", "pupil_dlc"))
     if missing:
         raise ValueError(f"Missing sources in inventory: {missing}")
 
