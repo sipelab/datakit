@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -114,9 +114,6 @@ class ExperimentStore:
         self._materialized = None
         self._master_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
         self.meta_frame = pd.DataFrame(columns=self._meta_columns())
-        self.session_attrs = {}
-        self.experiment_attrs = {}
-        self.time_basis = {}
         self._meta_rows = []
 
     @staticmethod
@@ -359,17 +356,11 @@ class ExperimentStore:
             else:
                 df.columns = pd.MultiIndex.from_product([["default"], df.columns], names=["Source", "Feature"])
         self._finalize_meta_frame()
-        meta_table = self._meta_table_to_wide()
+        meta_table = self._meta_table()
         if not meta_table.empty:
             df = pd.concat([df, meta_table], axis=1)
             df.columns.set_names(["Source", "Feature"], inplace=True)
         self._materialized = df
-        # df.attrs["meta_frame"] = self.meta_frame.to_dict(orient="records")
-        # df.attrs["meta_frame_columns"] = list(self.meta_frame.columns)
-        # df.attrs["session_attrs"] = dict(self.session_attrs)
-        # df.attrs["experiment_attrs"] = dict(self.experiment_attrs)
-        # df.attrs["time_basis"] = dict(self.time_basis)
-        # df.attrs["meta_columns"] = list(self._meta_columns())
         return df
 
     def release(self) -> None:
@@ -382,14 +373,11 @@ class ExperimentStore:
     # Metadata helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _meta_columns() -> List[str]:
+    def _meta_columns() -> list[str]:
         return list(settings.dataset.meta_columns)
 
     def _reset_meta_state(self) -> None:
         self._meta_rows.clear()
-        self.session_attrs.clear()
-        self.experiment_attrs.clear()
-        self.time_basis.clear()
         self.meta_frame = pd.DataFrame(columns=self._meta_columns())
 
     def _record_meta(self, idx: Tuple[str, str, str], source: str, meta: Dict[str, Any]) -> None:
@@ -400,11 +388,8 @@ class ExperimentStore:
         scope = meta.get(scope_key, "stream")
         values = {k: v for k, v in meta.items() if k != scope_key}
         if scope == settings.dataset.session_scope:
-            target = self.session_attrs.setdefault((subject, session), {})
-            target.update(values)
             return
         if scope == settings.dataset.experiment_scope:
-            self.experiment_attrs.update(values)
             return
         meta_columns = list(settings.dataset.meta_columns)
         subject_col, session_col, task_col = settings.dataset.index_names
@@ -424,8 +409,6 @@ class ExperimentStore:
                     dtype_col: type(value).__name__,
                 }
             )
-            if key == settings.dataset.time_basis_key and isinstance(value, str):
-                self.time_basis[source] = value
 
     def _finalize_meta_frame(self) -> None:
         if self._meta_rows:
@@ -433,7 +416,7 @@ class ExperimentStore:
         else:
             self.meta_frame = pd.DataFrame(columns=self._meta_columns())
 
-    def _meta_table_to_wide(self) -> pd.DataFrame:
+    def _meta_table(self) -> pd.DataFrame:
         if self.meta_frame.empty:
             return pd.DataFrame(index=self.inventory.index)
         meta_columns = list(settings.dataset.meta_columns)
@@ -446,18 +429,6 @@ class ExperimentStore:
         missing = [col for col in index_cols + [source_col, key_col, value_col] if col not in meta.columns]
         if missing:
             return pd.DataFrame(index=self.inventory.index)
-        pivot = meta.pivot_table(
-            index=index_cols,
-            columns=[source_col, key_col],
-            values=value_col,
-            aggfunc="first",
-        )
-        pivot = pivot.reindex(self.inventory.index)
-        if not pivot.empty:
-            pivot.columns = pd.MultiIndex.from_tuples(
-                [(str(source), f"meta.{key}") for source, key in pivot.columns],
-                names=["Source", "Feature"],
-            )
         grouped = (
             meta.groupby(index_cols + [source_col], dropna=False)[[key_col, value_col]]
             .apply(lambda group: {row[key_col]: row[value_col] for _, row in group.iterrows()})
@@ -469,9 +440,7 @@ class ExperimentStore:
                 [(str(source), "meta") for source in meta_dict.columns],
                 names=["Source", "Feature"],
             )
-        if pivot.empty and meta_dict.empty:
-            return pd.DataFrame(index=self.inventory.index)
-        return pd.concat([frame for frame in (pivot, meta_dict) if not frame.empty], axis=1)
+        return meta_dict if not meta_dict.empty else pd.DataFrame(index=self.inventory.index)
 
     # ------------------------------------------------------------------
     # Persistence helpers
