@@ -9,6 +9,9 @@ description = "Datakit utilities"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 
+[project.optional-dependencies]
+explore = ["rich"]
+
 [project.scripts]
 datakit = "datakit.__main__:main"
 

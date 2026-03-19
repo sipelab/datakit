@@ -91,6 +91,19 @@ def main() -> int:
         help="Open the shell without loading the file (use load() inside the session)",
     )
 
+    explore_parser = subparsers.add_parser(
+        "explore",
+        help="Explore the structure of an experiment directory or dataset file",
+    )
+    explore_parser.add_argument(
+        "--path", required=True, type=Path,
+        help="Path to experiment directory, .pkl, or .h5 dataset file",
+    )
+    explore_parser.add_argument(
+        "--key", default="hfsa_mvp",
+        help="HDF5 key when loading .h5 files (default: hfsa_mvp)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "load_source":
@@ -98,6 +111,12 @@ def main() -> int:
         if not path.exists() or not path.is_file():
             parser.error(f"--path must be an existing file: {path}")
         _load_source(path, args.tag, defer_load=args.defer_load)
+        return 0
+
+    if args.command == "explore":
+        from datakit.explore import explore
+
+        explore(args.path, hdf_key=args.key)
         return 0
 
     parser.print_help()

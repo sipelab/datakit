@@ -25,6 +25,7 @@ from .experiment import ExperimentData, ExperimentMetadata  # noqa: E402  (impor
 from .discover import discover_manifest  # noqa: E402  (import after logger to avoid circular import)
 from .loader import ExperimentStore  # noqa: E402  (import after logger to avoid circular import)
 from .config import settings  # noqa: E402  (import after logger to avoid circular import)
+from .explore import explore  # noqa: E402  (import after logger to avoid circular import)
 
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "discover_manifest",
     "ExperimentStore",
     "settings",
+    "explore",
 ]
