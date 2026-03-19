@@ -17,12 +17,13 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd
 
 from datakit.config import settings
+from datakit.datamodel import LoadedStream
 from datakit.experiment import ExperimentData
 from datakit.loader import (
     ExperimentStore,
     build_default_dataset,
 )
-from datakit.sources.register import DataSource
+from datakit.sources import SOURCE_REGISTRY
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -47,9 +48,9 @@ PIPELINE_TAGS = (
     "suite2p",
 )
 
-PIPELINE_VERSIONS = {"treadmill": "3.0", "psychopy": "3.1", "suite2p": "2.1"}
+PIPELINE_VERSIONS = {}
 
-
+#%%
 
 # ─── Quick-Test Helper ───────────────────────────────────────────────────────────
 """
@@ -81,11 +82,8 @@ inventory = experiment.data
 # If you do not want to generate the inventory first, just simply to the filepath directly
 entry = Path(inventory[source_tag].iloc[0]).resolve()
 
-# All DataSource subclasses are registered and created via a factory method using the tag
-loader = DataSource.create_loader(source_tag)
-
 # `entry` is a Path to a file for the given source_tag
-loaded = loader.load(entry)
+loaded = experiment.load_by_path(source_tag, entry)
 
 print(type(loaded))
 print(loaded)
@@ -95,8 +93,14 @@ print(loaded)
 source_tag = "treadmill"
 entry_path = Path(r"D:\jgronemeyer\240324_HFSA\data\sub-STREHAB02\ses-04\beh\20250327_165423_sub-STREHAB02_ses-04_task-widefield_treadmill_data.csv").resolve()
 
-loader = DataSource.create_loader(source_tag, version="2.1")
-trace = loader.load(entry_path).value
+loaded_trace = ExperimentData.load_from_path(source_tag, entry_path)
+if not isinstance(loaded_trace, LoadedStream):
+    raise TypeError("Expected LoadedStream from ExperimentData.load_from_path")
+
+trace = loaded_trace.value
+if not isinstance(trace, pd.DataFrame):
+    raise TypeError("Expected DataFrame payload from treadmill source")
+
 
 time = trace["time_elapsed_s"]
 speed = trace["speed_mm"]
@@ -119,7 +123,7 @@ etoH_experiment = ExperimentData(etoH_root, include_task_level=True)
 sliced_inventory = etoH_experiment.data
 #sliced_inventory = select_inventory_entry(sliced_inventory, subject="ACUTEVIS06", session="ses-02", task="task-movies")
 store = ExperimentStore(sliced_inventory)
-store.register_sources(PIPELINE_TAGS, versions=PIPELINE_VERSIONS)
+store.register_sources(PIPELINE_TAGS)
 
 dataset = store.materialize(progress=True)
 
@@ -150,13 +154,10 @@ print("Loaded dataset from pickle with shape", dataset.shape)
 """
 Display an overview of registered data source tags and their versions.
 """
-registry = DataSource.get_registered_sources()
 overview = []
-for tag, versions in registry.items():
+for tag in sorted(SOURCE_REGISTRY.keys()):
     overview.append({
         "tag": tag,
-        "versions": sorted(versions.keys()),
-        "latest": DataSource.get_latest_version(tag),
     })
 overview_df = pd.DataFrame(overview).sort_values("tag")
 print(overview_df)
@@ -165,7 +166,7 @@ print(overview_df)
 
 #%%
 # ─── Load and Merge ─────────────────────────────────────────────────────
-experiments = [r'D:\jgronemeyer\240324_HFSA', r'E:\jgronemeyer\250921_HFSA', r'D:\jgronemeyer\250627_HFSA']
+experiments = [r'E:\jgronemeyer\250921_HFSA', r'D:\jgronemeyer\250627_HFSA'] #r'D:\jgronemeyer\240324_HFSA',
 INSPECT_SOURCES = ("dataqueue", "timestamps")
 
 def load_inventory(path: Path) -> pd.DataFrame:
@@ -203,7 +204,7 @@ def merge_inventories(paths) -> pd.DataFrame:
 experiment_paths = [Path(p) for p in experiments]
 merged = merge_inventories(experiment_paths)
 merged_store = ExperimentStore(merged)
-merged_missing = merged_store.register_sources(PIPELINE_TAGS, versions=PIPELINE_VERSIONS)
+merged_missing = merged_store.register_sources(PIPELINE_TAGS)
 
 if merged_missing:
     print("Merged inventory missing sources:", sorted(merged_missing))
@@ -212,6 +213,14 @@ else:
 
 
 dataset = merged_store.materialize(progress=True)
-dataset.to_pickle('260129_HFSA-full.pkl')
+dataset.to_pickle('260319_HFSA-full.pkl')
 
+# %%
+from datakit import explore
+
+#explore("path/to/experiment")        # directory → ExperimentReport
+explore(r"C:\Users\SIPE_LAB\Desktop\dev\datakit\260217_HFSA-full.pkl")       # pickle → DatasetReport
+# explore(experiment_data_instance)     # ExperimentData → ExperimentReport
+# explore(materialized_dataframe)       # DataFrame → DatasetReport
+# report = explore(target, print_output=False)  # get report without printing
 # %%
