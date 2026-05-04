@@ -9,7 +9,7 @@ import pandas as pd
 
 from ..._utils._logger import get_logger
 from datakit.sources.camera.pupil import PupilMetadataSource
-from datakit.sources.register import SourceContext, TimeseriesSource
+from datakit.sources.register import LoadContext, TimeseriesSource
 from datakit.timeline import DataqueueIndex
 
 logger = get_logger(__name__)
@@ -25,6 +25,7 @@ class PupilDLCSource(TimeseriesSource):
     )
     camera_tag = "pupil_metadata"
     flatten_payload = True
+    requires = ("dataqueue", "pupil_metadata")
     default_frame_rate_hz = 20.0
     confidence_threshold = 0.7
     pixel_to_mm = 53.6
@@ -37,7 +38,7 @@ class PupilDLCSource(TimeseriesSource):
         self,
         path: Path,
         *,
-        context: SourceContext | None = None,
+        context: LoadContext | None = None,
     ) -> tuple[np.ndarray, pd.DataFrame, dict]:
         """Load DeepLabCut output and return a time-indexed table."""
         context = self._require_context(context)
@@ -93,7 +94,7 @@ class PupilDLCSource(TimeseriesSource):
 
         return t, analyzed_df, meta
 
-    def _aligned_timeline(self, context: SourceContext, n_frames: int) -> tuple[np.ndarray, dict] | None:
+    def _aligned_timeline(self, context: LoadContext, n_frames: int) -> tuple[np.ndarray, dict] | None:
         if context.dataqueue_frame is not None:
             times = self._aligned_from_frame(context.dataqueue_frame)
             dq_path = context.path_for("dataqueue")

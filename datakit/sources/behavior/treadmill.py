@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from datakit.config import settings
-from datakit.sources.register import SourceContext, TimeseriesSource
+from datakit.sources.register import LoadContext, TimeseriesSource
 
 
 class TreadmillSource(TimeseriesSource):
@@ -17,6 +17,7 @@ class TreadmillSource(TimeseriesSource):
     tag = "treadmill"
     patterns = ("**/*_treadmill.csv", "**/*_treadmill_data.csv")
     camera_tag = None
+    requires = ("dataqueue",)
 
     timestamp_column = "timestamp"
     distance_columns = ("distance_mm", "distance")
@@ -35,7 +36,7 @@ class TreadmillSource(TimeseriesSource):
         self,
         path: Path,
         *,
-        context: SourceContext | None = None,
+        context: LoadContext | None = None,
     ) -> tuple[np.ndarray, pd.DataFrame, dict]:
         context = self._require_context(context)
         df = pd.read_csv(path)

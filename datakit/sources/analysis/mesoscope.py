@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from datakit.sources.register import SourceContext, TimeseriesSource
+from datakit.sources.register import LoadContext, TimeseriesSource
 
 
 class MesoMeanSource(TimeseriesSource):
@@ -32,7 +32,7 @@ class MesoMeanSource(TimeseriesSource):
         self,
         path: Path,
         *,
-        context: SourceContext | None = None,
+        context: LoadContext | None = None,
     ) -> tuple[np.ndarray, pd.DataFrame, dict]:
         """Read a mesoscope CSV and return a normalized table."""
         df = pd.read_csv(path)

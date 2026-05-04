@@ -33,7 +33,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from datakit.sources.register import IntervalSeriesSource, SourceContext
+from datakit.sources.register import IntervalSeriesSource, LoadContext
 from datakit.timeline import DataqueueIndex
 
 
@@ -51,6 +51,7 @@ class Psychopy(IntervalSeriesSource):
 
     tag = "psychopy"
     patterns = ("**/*_psychopy.csv",)
+    requires = ("dataqueue",)
     task_pattern = _TASK_PATTERN
     task_aliases = _TASK_ALIASES
     time_suffixes = _TIME_SUFFIXES
@@ -87,7 +88,7 @@ class Psychopy(IntervalSeriesSource):
         self,
         path: Path,
         *,
-        context: SourceContext | None = None,
+        context: LoadContext | None = None,
     ) -> tuple[pd.DataFrame, dict]:
         context = self._require_context(context)
         # 1) Read raw psychopy CSV.
@@ -253,7 +254,7 @@ class Psychopy(IntervalSeriesSource):
                 return filled.to_numpy(dtype=np.float64), col, meta
         raise ValueError("Psychopy requires a display_*.started column with at least 2 numeric values.")
 
-    def _dataqueue_offset(self, context: SourceContext) -> tuple[Optional[float], dict]:
+    def _dataqueue_offset(self, context: LoadContext) -> tuple[Optional[float], dict]:
         #TODO: If a dataqueue does not have nidaq payload==1 but may start at nidaq==2,
         # treat the first pulse as the start and log a warning. 
         dq_path = context.path_for("dataqueue")
@@ -297,7 +298,7 @@ class Psychopy(IntervalSeriesSource):
     def _apply_experiment_window(
         self,
         intervals: pd.DataFrame,
-        context: SourceContext,
+        context: LoadContext,
         dq_start: float | None,
     ) -> pd.DataFrame:
         if context.experiment_window is None or dq_start is None:

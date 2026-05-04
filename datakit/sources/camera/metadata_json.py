@@ -10,7 +10,7 @@ import json
 import numpy as np
 import pandas as pd
 
-from datakit.sources.register import SourceContext, TableSource
+from datakit.sources.register import LoadContext, TableSource
 
 
 class MetadataJSON(TableSource):
@@ -28,7 +28,7 @@ class MetadataJSON(TableSource):
         self,
         path: Path,
         *,
-        context: SourceContext | None = None,
+        context: LoadContext | None = None,
     ) -> tuple[np.ndarray, pd.DataFrame, dict[str, Any]]:
         """Normalize metadata rows and build a timeline."""
         with open(path, "r") as handle:

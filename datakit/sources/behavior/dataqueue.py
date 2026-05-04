@@ -11,7 +11,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from datakit.sources.register import SourceContext, TimeseriesSource
+from datakit.sources.register import LoadContext, TimeseriesSource
 
 
 class DataqueueSource(TimeseriesSource):
@@ -34,7 +34,7 @@ class DataqueueSource(TimeseriesSource):
         self,
         path: Path,
         *,
-        context: SourceContext | None = None,
+        context: LoadContext | None = None,
     ) -> tuple[np.ndarray, pd.DataFrame, dict]:
         """Read ``*_dataqueue.csv`` and return a time-indexed table."""
         raw = pd.read_csv(path, low_memory=False)
