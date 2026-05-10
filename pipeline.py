@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 
 import datakit
 from datakit import Dataset, LoadedStream
+from datakit import explore
 from datakit.sources import SOURCE_REGISTRY
 
 # Display pandas objects more readably while debugging
@@ -108,6 +109,24 @@ materialized = datakit.load(acutevis_root, sources=PIPELINE_TAGS, progress=True)
 #   ds = ds.include(subject=["ACUTEVIS06", "ACUTEVIS07"])  # multi-row filter
 #   ds = ds.head(3)                                          # first 3 rows
 #   materialized = ds.materialize(progress=True)
+
+#%%
+# ─── Explore: inspect dataset structure ───────────────────────────────
+# `datakit.explore` accepts a Dataset, a materialized DataFrame, or a path
+# to a directory / .pkl / .h5 file. It prints a formatted summary (uses
+# `rich` if installed, otherwise plain text) and returns a report object
+# for programmatic access.
+
+# Pre-load: inventory overview from a discovered Dataset
+acutevis_dataset = Dataset.from_directory(acutevis_root, sources=PIPELINE_TAGS)
+inventory_report = explore(acutevis_dataset)
+
+# Post-load: structure, dtypes, and coverage of a materialized DataFrame
+materialized_report = explore(materialized)
+
+# Or point directly at a directory or saved artifact
+# explore(acutevis_root)
+# explore(etoH_pickle_path)
 
 #%%
 # ─── Save dataset to disk ─────────────────────────────────────────────────────
