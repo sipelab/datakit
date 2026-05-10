@@ -246,6 +246,7 @@ class Dataset:
                 raise KeyError(f"Unknown source tag(s): {sorted(unknown)}")
         self._sources = tags
         self._roots = tuple(Path(r) for r in roots)
+        self._notes: list[str] = []
 
     # ---- Construction -------------------------------------------------
 
@@ -305,6 +306,18 @@ class Dataset:
     @property
     def has_task_level(self) -> bool:
         return self._inventory.index.nlevels >= 3
+
+    @property
+    def notes(self) -> list[str]:
+        """Free-form notes attached to this dataset."""
+        return list(self._notes)
+
+    def add_note(self, note: str) -> "Dataset":
+        """Append a free-form note; persisted via ``df.attrs['datakit_notes']``."""
+        if not isinstance(note, str):
+            raise TypeError("note must be a string")
+        self._notes.append(note)
+        return self
 
     @property
     def meta(self) -> dict:
@@ -583,6 +596,7 @@ class Dataset:
         df.attrs["datakit"] = _build_meta()
         df.attrs["datakit_sources"] = list(self._sources)
         df.attrs["datakit_roots"] = [str(r) for r in self._roots]
+        df.attrs["datakit_notes"] = list(self._notes)
 
         if return_errors:
             n_levels = idx.nlevels
