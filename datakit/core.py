@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from ._utils._logger import get_logger
+from ._version import build_meta as _build_meta
 from .config import settings
 from .datamodel import LoadedStream, Manifest, ManifestEntry
 from .discover import discover_manifest
@@ -305,6 +306,15 @@ class Dataset:
     def has_task_level(self) -> bool:
         return self._inventory.index.nlevels >= 3
 
+    @property
+    def meta(self) -> dict:
+        """Provenance metadata for the running datakit package.
+
+        The same dictionary is attached to the materialized DataFrame as
+        ``df.attrs["datakit"]`` so it persists through pickle round-trips.
+        """
+        return _build_meta()
+
     def __repr__(self) -> str:
         return (
             f"Dataset(rows={len(self._inventory)}, sources={len(self._sources)}, "
@@ -566,6 +576,13 @@ class Dataset:
             data = {c: [r.get(c, np.nan) for r in rows] for c in all_cols}
             df = pd.DataFrame(data, index=idx)
             df.columns = pd.MultiIndex.from_tuples(all_cols, names=["Source", "Feature"])
+
+        # Embed provenance metadata so pickled artefacts can be traced back to
+        # the exact datakit revision that produced them. ``DataFrame.attrs``
+        # round-trips through ``to_pickle``/``read_pickle``.
+        df.attrs["datakit"] = _build_meta()
+        df.attrs["datakit_sources"] = list(self._sources)
+        df.attrs["datakit_roots"] = [str(r) for r in self._roots]
 
         if return_errors:
             n_levels = idx.nlevels

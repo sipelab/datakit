@@ -165,24 +165,16 @@ experiments = [r'E:\jgronemeyer\250921_HFSA', r'D:\jgronemeyer\250627_HFSA']  # 
 
 # `Dataset.from_directory` accepts a sequence of roots and concatenates them.
 experiment_paths = [Path(p) for p in experiments]
-for resolved in (p.expanduser().resolve() for p in experiment_paths):
-    if not resolved.exists() or not resolved.is_dir():
-        raise FileNotFoundError(f"Experiment directory missing: {resolved}")
 
-merged_dataset = Dataset.from_directory(experiment_paths, sources=PIPELINE_TAGS)
+merged_dataset = Dataset.from_directory(experiment_paths, sources=PIPELINE_TAGS).head(1)
+inventory_report = explore(merged_dataset)
 
 # Per-source coverage report on the merged inventory.
 coverage = datakit.inspect_sources(merged_dataset, sources=PIPELINE_TAGS)
 print(coverage)
 
-merged_missing = coverage.index[coverage["present"] == 0].tolist()
-if merged_missing:
-    print("Merged inventory missing sources:", merged_missing)
-else:
-    print("Merged inventory has at least one row for every requested source.")
-
 materialized = merged_dataset.materialize(progress=True)
-materialized.to_pickle('260319_HFSA-full.pkl')
+#materialized.to_pickle('260319_HFSA-full.pkl')
 
 # %%
 # ─── Validation report ───────────────────────────────────────────────────

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datakit"
-version = "2025.11.22"
+dynamic = ["version"]
 description = "Datakit utilities"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -22,3 +22,6 @@ packages = [
     "datakit.sources",
     "datakit.sources.behavior",
 ]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
