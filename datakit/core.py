@@ -191,9 +191,9 @@ def _flatten(stream: LoadedStream) -> dict[tuple[str, str], Any]:
         settings.sources.meta_source_key,
         settings.sources.meta_interval_key,
     }
-    for k, v in meta.items():
-        if k not in skip:
-            cells[(tag, f"meta__{k}")] = v
+    meta_dict = {k: v for k, v in meta.items() if k not in skip}
+    if meta_dict:
+        cells[(tag, "meta")] = meta_dict
     return cells
 
 

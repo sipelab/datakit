@@ -43,7 +43,7 @@ def test_materialize_includes_loaded_sources(dataset):
 def test_materialize_meta_columns_prefixed(dataset):
     df = dataset.materialize(strict=True)
     features = df.columns.get_level_values(1).unique().tolist()
-    assert any(f.startswith("meta__") for f in features)
+    assert "meta" in features
 
 
 def test_materialize_empty_inventory_returns_empty_frame(sample_experiment_1):
@@ -112,12 +112,13 @@ def test_flatten_scalar_payload():
 
 def test_flatten_includes_meta_columns():
     cells = _flatten(_stream(np.array([1.0]), meta={"sample_rate": 1000}))
-    assert ("probe", "meta__sample_rate") in cells
+    assert ("probe", "meta") in cells
+    assert cells[("probe", "meta")] == {"sample_rate": 1000}
 
 
 def test_flatten_skips_session_scoped_meta():
     cells = _flatten(_stream(np.array([1.0]), meta={"scope": "session", "k": "v"}))
-    assert all(not f.startswith("meta__") for (_, f) in cells.keys())
+    assert all(f != "meta" for (_, f) in cells.keys())
 
 
 # ---------------------------------------------------------------------------
