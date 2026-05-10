@@ -29,6 +29,7 @@ pd.set_option("display.width", 180)
 # ─── Pipeline-Local Source Selection ───────────────────────────────────────────
 PIPELINE_TAGS = (
     "mesomap",
+    "meso_mean",
     "timestamps",
     "dataqueue",
     "treadmill",
@@ -42,8 +43,14 @@ PIPELINE_TAGS = (
     "suite2p",
 )
 
-#%%
+# ─── List Available Data Sources ─────────────────────────────────────────────────────
+overview_df = pd.DataFrame(
+    [{"tag": tag} for tag in sorted(SOURCE_REGISTRY.keys())]
+).sort_values("tag")
+print(overview_df)
 
+
+#%%
 # ─── Quick-Test Helpers ───────────────────────────────────────────────────────────
 # Use the built-in convenience methods on Dataset:
 #   ds.head(3)                         # first 3 rows (replaces slice_inventory)
@@ -148,15 +155,6 @@ print(f"ETOH dataset stored at: {etoH_hdf_path}")
 # Load pickle back into memory
 materialized = pd.read_pickle(etoH_pickle_path)
 print("Loaded dataset from pickle with shape", materialized.shape)
-
-
-#%%
-# ─── List Available Data Sources ─────────────────────────────────────────────────────
-overview_df = pd.DataFrame(
-    [{"tag": tag} for tag in sorted(SOURCE_REGISTRY.keys())]
-).sort_values("tag")
-print(overview_df)
-
 
 
 #%%

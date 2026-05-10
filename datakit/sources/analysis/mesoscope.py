@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from datakit.sources.register import LoadContext, TimeseriesSource
+from datakit.sources.register import LoadContext, TimeseriesSource, document
 
 
 class MesoMeanSource(TimeseriesSource):
@@ -54,6 +54,7 @@ class MesoMeanSource(TimeseriesSource):
         
         return t, df, {"source_file": str(path), "n_slices": len(df)}
 
+    @document
     def _dff_normalize(self, series: pd.Series) -> pd.Series:
         """Compute a simple dF/F normalization for the ``Mean`` column."""
         if self.normalization_baseline == "min":

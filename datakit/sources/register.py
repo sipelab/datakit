@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Dict, Iterable, Mapping, Optional, Tuple
@@ -11,6 +12,15 @@ import pandas as pd
 
 from datakit.config import settings
 from ..datamodel import LoadedStream
+
+
+_DOCUMENT_FLAG = "__datakit_document__"
+
+
+def document(method):
+    """Mark a method so its docstring is captured into stream ``meta['docs']``."""
+    setattr(method, _DOCUMENT_FLAG, True)
+    return method
 
 
 @dataclass(frozen=True)
@@ -108,6 +118,13 @@ class DataSource:
         meta_dict.setdefault(settings.sources.meta_source_key, self.tag)
         if is_interval:
             meta_dict.setdefault(settings.sources.meta_interval_key, True)
+        docs = {
+            name: inspect.getdoc(attr)
+            for name, attr in inspect.getmembers(type(self), callable)
+            if getattr(attr, _DOCUMENT_FLAG, False)
+        }
+        if docs:
+            meta_dict.setdefault("docs", docs)
         return meta_dict
 
 
