@@ -336,7 +336,22 @@ class Dataset:
         task: Optional[Union[str, Sequence[str]]] = None,
         source: Optional[Union[str, Sequence[str]]] = None,
     ) -> "Dataset":
-        """Keep only rows/sources matching the given filters (AND-combined)."""
+        """Keep only rows/sources matching the given filters (AND-combined).
+
+        Each keyword accepts either a single string or a sequence of strings;
+        ``None`` (the default) means "no constraint on this axis". All
+        provided filters are combined with logical AND, so adding a keyword
+        narrows the result. Returns a new ``Dataset`` — the original is
+        unchanged, so calls chain naturally.
+
+        Examples
+        --------
+        >>> ds.include(subject="STREHAB07")              # one subject
+        >>> ds.include(subject=["STREHAB07", "STREHAB08"])  # multiple subjects
+        >>> ds.include(session="ses-05", task="task-widefield")
+        >>> ds.include(source=["dataqueue", "treadmill"])    # drop other sources
+        >>> ds.include(subject="STREHAB07").include(task="task-movies")  # chain
+        """
         mask = self._row_mask(_norm(subject), _norm(session), _norm(task))
         srcs = _norm(source)
         new_sources = tuple(t for t in self._sources if t in srcs) if srcs is not None else self._sources
@@ -352,9 +367,22 @@ class Dataset:
     ) -> "Dataset":
         """Drop rows/sources matching the given filters.
 
-        - source-only: drop those sources globally.
-        - row-only: drop matching rows.
-        - both: NaN out the source columns within matching rows only.
+        Like :meth:`include`, every keyword accepts a string or a sequence
+        of strings, and combining keywords narrows what gets removed.
+        Behavior depends on which axes are provided:
+
+        - **source only** — drop those source columns globally.
+        - **row axes only** (subject/session/task) — drop matching rows.
+        - **both** — NaN out only the listed source columns within matching
+          rows; rows and other sources are preserved.
+
+        Examples
+        --------
+        >>> ds.exclude(subject="STREHAB07")                   # drop a subject
+        >>> ds.exclude(source="psychopy")                     # drop a source globally
+        >>> ds.exclude(session=["ses-01", "ses-02"])          # drop multiple sessions
+        >>> ds.exclude(subject="STREHAB07", source="pupil_dlc")
+        ... # blank pupil_dlc only for STREHAB07; other rows/sources untouched
         """
         subj, ses, tsk, srcs = _norm(subject), _norm(session), _norm(task), _norm(source)
         has_row = any(s is not None for s in (subj, ses, tsk))
@@ -370,6 +398,55 @@ class Dataset:
             if cols:
                 new_inv.loc[mask, cols] = np.nan
         return Dataset(new_inv, sources=new_sources, roots=self._roots)
+
+    def head(self, n: int = 3) -> "Dataset":
+        """Return a new ``Dataset`` containing only the first ``n`` rows.
+
+        Convenience for quick tests; equivalent to slicing the inventory
+        with ``.iloc[:n]`` while preserving sources and roots.
+        """
+        if not isinstance(n, int) or n < 0:
+            raise ValueError(f"n must be a non-negative int; got {n!r}")
+        return Dataset(self._inventory.iloc[:n].copy(), sources=self._sources, roots=self._roots)
+
+    def select(
+        self,
+        subject: str,
+        session: str,
+        task: Optional[str] = None,
+    ) -> "Dataset":
+        """Return a new ``Dataset`` containing exactly one inventory row.
+
+        Positional shorthand for ``include(subject=..., session=..., task=...)``
+        intended for the common "give me this one cell" use case. Unlike
+        :meth:`include`, all arguments must be single strings — for
+        multi-value or partial filtering use :meth:`include` directly:
+
+        >>> ds.select("STREHAB07", "ses-05", "task-widefield")  # one cell
+        >>> ds.include(subject="STREHAB07", session="ses-05")   # all tasks for that session
+
+        Raises ``KeyError`` if no row matches and ``ValueError`` if more
+        than one row matches (e.g. when ``task`` is omitted on a
+        task-level inventory and multiple tasks exist for the session).
+        """
+        for name, value in (("subject", subject), ("session", session), ("task", task)):
+            if value is not None and not isinstance(value, str):
+                raise TypeError(
+                    f"select(): {name} must be a string; got {type(value).__name__}. "
+                    "Use Dataset.include() for multi-value filtering."
+                )
+        ds = self.include(subject=subject, session=session, task=task)
+        n = len(ds._inventory)
+        if n == 0:
+            key = (subject, session) if task is None else (subject, session, task)
+            raise KeyError(f"No inventory entry for {key}")
+        if n > 1:
+            key = (subject, session) if task is None else (subject, session, task)
+            raise ValueError(
+                f"select() matched {n} rows for {key}; "
+                "narrow with task=... or use Dataset.include() instead."
+            )
+        return ds
 
     # ---- Materialize / validate --------------------------------------
 
@@ -523,4 +600,115 @@ class Dataset:
         return out
 
 
-__all__ = ["Dataset", "LoadContext", "LoadedStream"]
+# ---------------------------------------------------------------------------
+# Top-level convenience API
+# ---------------------------------------------------------------------------
+
+
+def load(
+    root: Union[PathLike, Sequence[PathLike]],
+    *,
+    sources: Optional[Iterable[str]] = None,
+    prefer_processed: bool = True,
+    include_task_level: bool | None = True,
+    progress: bool = True,
+    strict: bool = True,
+    return_errors: bool = False,
+) -> Union[pd.DataFrame, tuple[pd.DataFrame, pd.DataFrame]]:
+    """One-shot discovery + materialization.
+
+    Equivalent to ``Dataset.from_directory(root, ...).materialize(...)``.
+    Use :meth:`Dataset.from_directory` directly when you need to filter
+    (``.include`` / ``.exclude``) before materializing.
+    """
+    ds = Dataset.from_directory(
+        root,
+        sources=sources,
+        prefer_processed=prefer_processed,
+        include_task_level=include_task_level,
+    )
+    return ds.materialize(strict=strict, progress=progress, return_errors=return_errors)
+
+
+def load_path(tag: str, path: PathLike) -> LoadedStream:
+    """Ad-hoc single-file load via the registered source for ``tag``.
+
+    Builds a minimal :class:`LoadContext` so sources without ``requires``
+    or sibling-path lookups can be exercised directly. Sources declaring
+    dependencies will receive ``None`` for them in ``context.dependencies``
+    and must either degrade gracefully or raise.
+    """
+    if tag not in SOURCE_REGISTRY:
+        raise KeyError(f"Unknown source tag: {tag!r}")
+    cls_ = SOURCE_REGISTRY[tag]
+    p = Path(path)
+    ctx = LoadContext(
+        subject="unknown",
+        session="unknown",
+        task=None,
+        inventory_row={tag: str(p)},
+        dependencies={},
+    )
+    return cls_().load(p, context=ctx)
+
+
+def inspect_sources(
+    inventory_or_dataset: Union["Dataset", pd.DataFrame],
+    sources: Optional[Iterable[str]] = None,
+) -> pd.DataFrame:
+    """Return a per-source coverage summary for an inventory.
+
+    The returned DataFrame is indexed by source tag with columns
+    ``present``, ``total``, ``missing``, and ``coverage`` (fraction of rows
+    with a non-null path). Accepts either a :class:`Dataset` or a raw
+    inventory DataFrame.
+
+    When ``sources`` is omitted, every registered tag found in the
+    inventory's columns is reported.
+    """
+    if isinstance(inventory_or_dataset, Dataset):
+        inv = inventory_or_dataset.inventory
+    elif isinstance(inventory_or_dataset, pd.DataFrame):
+        inv = inventory_or_dataset
+    else:
+        raise TypeError(
+            "inspect_sources expects a Dataset or DataFrame; got "
+            f"{type(inventory_or_dataset).__name__}"
+        )
+
+    if sources is None:
+        tags = [c for c in inv.columns if c in SOURCE_REGISTRY]
+    else:
+        tags = list(sources)
+
+    total = len(inv)
+    rows: list[dict[str, Any]] = []
+    for tag in tags:
+        if tag not in inv.columns:
+            rows.append({
+                "source": tag,
+                "present": 0,
+                "total": total,
+                "missing": total,
+                "coverage": 0.0,
+            })
+            continue
+        present = int(inv[tag].notna().sum())
+        rows.append({
+            "source": tag,
+            "present": present,
+            "total": total,
+            "missing": total - present,
+            "coverage": (present / total) if total else 0.0,
+        })
+    return pd.DataFrame(rows).set_index("source")
+
+
+__all__ = [
+    "Dataset",
+    "LoadContext",
+    "LoadedStream",
+    "load",
+    "load_path",
+    "inspect_sources",
+]

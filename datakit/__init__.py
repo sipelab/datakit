@@ -14,7 +14,7 @@ from ._utils._logger import get_logger
 logger = get_logger("datakit")
 
 from .config import settings  # noqa: E402
-from .core import Dataset  # noqa: E402
+from .core import Dataset, inspect_sources, load, load_path  # noqa: E402
 from .datamodel import LoadedStream  # noqa: E402
 from .sources.register import DataSource, LoadContext  # noqa: E402
 
@@ -24,6 +24,9 @@ __all__ = [
     "LoadContext",
     "LoadedStream",
     "get_logger",
+    "inspect_sources",
+    "load",
+    "load_path",
     "logger",
     "settings",
 ]

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Optional
 
 # Ensure the project root is importable even when running cells out of context
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -15,17 +14,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd
-
-from datakit.config import settings
-from datakit.datamodel import LoadedStream
-from datakit.experiment import ExperimentData
-from datakit.loader import (
-    ExperimentStore,
-    build_default_dataset,
-)
-from datakit.sources import SOURCE_REGISTRY
-import numpy as np
 import matplotlib.pyplot as plt
+
+import datakit
+from datakit import Dataset, LoadedStream
+from datakit.sources import SOURCE_REGISTRY
 
 # Display pandas objects more readably while debugging
 pd.set_option("display.max_columns", 60)
@@ -48,26 +41,14 @@ PIPELINE_TAGS = (
     "suite2p",
 )
 
-PIPELINE_VERSIONS = {}
-
 #%%
 
-# ─── Quick-Test Helper ───────────────────────────────────────────────────────────
-"""
-Return a small slice of the inventory for quick tests.
-"""
-def slice_inventory(frame: pd.DataFrame, entries: Any = 3) -> pd.DataFrame:
-    if isinstance(entries, int):
-        return frame.iloc[:entries].copy()
-    return frame.loc[list(entries)].copy()
-
-
-"""
-Select a single (Subject, Session, Task) entry from a MultiIndex inventory.
-"""
-def select_inventory_entry(frame: pd.DataFrame, subject: str, session: str, task: str) -> pd.DataFrame:
-    key = (subject, session, task)
-    return frame.loc[[key]].copy()
+# ─── Quick-Test Helpers ───────────────────────────────────────────────────────────
+# Use the built-in convenience methods on Dataset:
+#   ds.head(3)                         # first 3 rows (replaces slice_inventory)
+#   ds.select(subject, session, task)  # single entry (replaces select_inventory_entry)
+#   ds.include(subject=..., session=..., task=..., source=...)  # general filter
+#   ds.exclude(...)                    # inverse of include
 
 
 #%%
@@ -75,15 +56,15 @@ def select_inventory_entry(frame: pd.DataFrame, subject: str, session: str, task
 
 source_tag = "psychopy"
 experiment_root = Path(r"F:\251215_ETOH_RO1").resolve()
-experiment = ExperimentData(experiment_root, include_task_level=True)
-inventory = experiment.data
+experiment_dataset = Dataset.from_directory(experiment_root, include_task_level=True)
+inventory = experiment_dataset.inventory
 
 # Get a file path from the inventory with the source_tag
-# If you do not want to generate the inventory first, just simply to the filepath directly
+# If you do not want to generate the inventory first, just use the filepath directly.
 entry = Path(inventory[source_tag].iloc[0]).resolve()
 
 # `entry` is a Path to a file for the given source_tag
-loaded = experiment.load_by_path(source_tag, entry)
+loaded = datakit.load_path(source_tag, entry)
 
 print(type(loaded))
 print(loaded)
@@ -93,9 +74,9 @@ print(loaded)
 source_tag = "treadmill"
 entry_path = Path(r"D:\jgronemeyer\240324_HFSA\data\sub-STREHAB02\ses-04\beh\20250327_165423_sub-STREHAB02_ses-04_task-widefield_treadmill_data.csv").resolve()
 
-loaded_trace = ExperimentData.load_from_path(source_tag, entry_path)
+loaded_trace = datakit.load_path(source_tag, entry_path)
 if not isinstance(loaded_trace, LoadedStream):
-    raise TypeError("Expected LoadedStream from ExperimentData.load_from_path")
+    raise TypeError("Expected LoadedStream from datakit.load_path")
 
 trace = loaded_trace.value
 if not isinstance(trace, pd.DataFrame):
@@ -117,110 +98,76 @@ plt.show()
 #%%
 # ─── Build a dataset ───────────────────────────────────────────────────
 
-# Build dataset for F:\251215_ETOH_RO1
-etoH_root = Path(r"G:\Projects\ACUTEVIS").resolve()
-etoH_experiment = ExperimentData(etoH_root, include_task_level=True)
-sliced_inventory = etoH_experiment.data
-#sliced_inventory = select_inventory_entry(sliced_inventory, subject="ACUTEVIS06", session="ses-02", task="task-movies")
-store = ExperimentStore(sliced_inventory)
-store.register_sources(PIPELINE_TAGS)
+# One-shot: discover + materialize.
+acutevis_root = Path(r"G:\Projects\ACUTEVIS").resolve()
+materialized = datakit.load(acutevis_root, sources=PIPELINE_TAGS, progress=True)
 
-dataset = store.materialize(progress=True)
+# When you need to filter rows before materializing, use the lazy (meaning deferred) form:
+#   ds = Dataset.from_directory(acutevis_root, sources=PIPELINE_TAGS)
+#   ds = ds.select("ACUTEVIS06", "ses-02", "task-movies")  # single entry
+#   ds = ds.include(subject=["ACUTEVIS06", "ACUTEVIS07"])  # multi-row filter
+#   ds = ds.head(3)                                          # first 3 rows
+#   materialized = ds.materialize(progress=True)
 
 #%%
-#%%
-# ─── Build Dataset Function and Save dataset to disk ─────────────────────────────────────────────────────
+# ─── Save dataset to disk ─────────────────────────────────────────────────────
 
-# As opposed to the steps above, the build_default_dataset function
-# handles the entire experiment inventory and dataset building in one step.
-# This saves to an HDF5 file on disk and returns the path to that file.
+# `Dataset.save` materializes and writes to disk in one step.
+# Pickle by default; pass format="hdf5" or use a .h5/.hdf5 suffix for HDF5.
 etoH_root = Path(r"F:\251215_ETOH_RO1").resolve()
-etoH_dataset_path = build_default_dataset(etoH_root)
-print(f"ETOH dataset stored at: {etoH_dataset_path}")
+etoH_dataset = Dataset.from_directory(etoH_root, sources=PIPELINE_TAGS)
 
-# Load HDF5 into pandas and save as pickle
-etoH_loaded = pd.read_hdf(etoH_dataset_path)
-etoH_pickle_path = etoH_dataset_path.with_suffix(".pkl")
-etoH_loaded.to_pickle(etoH_pickle_path)
+etoH_pickle_path = etoH_root / "processed" / "260204_dataset_mvp.pkl"
+etoH_dataset.save(etoH_pickle_path, progress=True)
 print(f"ETOH dataset pickled to: {etoH_pickle_path}")
 
-# Load pickle into memory; `dataset` variable
-dataset = pd.read_pickle(r"F:\251215_ETOH_RO1\processed\260204_dataset_mvp.pkl")
-print("Loaded dataset from pickle with shape", dataset.shape)
+# Optionally also write HDF5
+etoH_hdf_path = etoH_pickle_path.with_suffix(".h5")
+etoH_dataset.save(etoH_hdf_path, format="hdf5", progress=True)
+print(f"ETOH dataset stored at: {etoH_hdf_path}")
+
+# Load pickle back into memory
+materialized = pd.read_pickle(etoH_pickle_path)
+print("Loaded dataset from pickle with shape", materialized.shape)
 
 
 #%%
 # ─── List Available Data Sources ─────────────────────────────────────────────────────
-"""
-Display an overview of registered data source tags and their versions.
-"""
-overview = []
-for tag in sorted(SOURCE_REGISTRY.keys()):
-    overview.append({
-        "tag": tag,
-    })
-overview_df = pd.DataFrame(overview).sort_values("tag")
+overview_df = pd.DataFrame(
+    [{"tag": tag} for tag in sorted(SOURCE_REGISTRY.keys())]
+).sort_values("tag")
 print(overview_df)
 
 
 
 #%%
 # ─── Load and Merge ─────────────────────────────────────────────────────
-experiments = [r'E:\jgronemeyer\250921_HFSA', r'D:\jgronemeyer\250627_HFSA'] #r'D:\jgronemeyer\240324_HFSA',
-INSPECT_SOURCES = ("dataqueue", "timestamps")
+experiments = [r'E:\jgronemeyer\250921_HFSA', r'D:\jgronemeyer\250627_HFSA']  # r'D:\jgronemeyer\240324_HFSA',
 
-def load_inventory(path: Path) -> pd.DataFrame:
-    experiment = ExperimentData(path, include_task_level=True)
-    return experiment.data
-
-
-def inspect_sources(frame: pd.DataFrame, label: str) -> None:
-    for source in INSPECT_SOURCES:
-        if source not in frame.columns:
-            print(f"[inspect] {label}: missing '{source}' column entirely")
-            continue
-        series = frame[source]
-        present = series.notna().sum()
-        total = len(series)
-        print(f"[inspect] {label}: '{source}' populated for {present}/{total} rows")
-        if present == 0:
-            sample_index = list(series.index[:3])
-            print(f"           first few index entries without '{source}': {sample_index}")
-
-
-def merge_inventories(paths) -> pd.DataFrame:
-    frames = []
-    for raw in paths:
-        resolved = raw.expanduser().resolve()
-        if not resolved.exists() or not resolved.is_dir():
-            raise FileNotFoundError(f"Experiment directory missing: {resolved}")
-        frame = load_inventory(resolved)
-        inspect_sources(frame, resolved.name)
-        frames.append(frame)
-        print(f"Loaded {resolved} -> shape {frame.shape}")
-    return pd.concat(frames, sort=False)
-
-
+# `Dataset.from_directory` accepts a sequence of roots and concatenates them.
 experiment_paths = [Path(p) for p in experiments]
-merged = merge_inventories(experiment_paths)
-merged_store = ExperimentStore(merged)
-merged_missing = merged_store.register_sources(PIPELINE_TAGS)
+for resolved in (p.expanduser().resolve() for p in experiment_paths):
+    if not resolved.exists() or not resolved.is_dir():
+        raise FileNotFoundError(f"Experiment directory missing: {resolved}")
 
+merged_dataset = Dataset.from_directory(experiment_paths, sources=PIPELINE_TAGS)
+
+# Per-source coverage report on the merged inventory.
+coverage = datakit.inspect_sources(merged_dataset, sources=PIPELINE_TAGS)
+print(coverage)
+
+merged_missing = coverage.index[coverage["present"] == 0].tolist()
 if merged_missing:
-    print("Merged inventory missing sources:", sorted(merged_missing))
+    print("Merged inventory missing sources:", merged_missing)
 else:
-    print("Merged inventory includes all default sources.")
+    print("Merged inventory has at least one row for every requested source.")
 
-
-dataset = merged_store.materialize(progress=True)
-dataset.to_pickle('260319_HFSA-full.pkl')
+materialized = merged_dataset.materialize(progress=True)
+materialized.to_pickle('260319_HFSA-full.pkl')
 
 # %%
-from datakit import explore
-
-#explore("path/to/experiment")        # directory → ExperimentReport
-explore(r"C:\Users\SIPE_LAB\Desktop\dev\datakit\260217_HFSA-full.pkl")       # pickle → DatasetReport
-# explore(experiment_data_instance)     # ExperimentData → ExperimentReport
-# explore(materialized_dataframe)       # DataFrame → DatasetReport
-# report = explore(target, print_output=False)  # get report without printing
+# ─── Validation report ───────────────────────────────────────────────────
+# `validate` runs every (cell, source) and reports status without raising.
+report = merged_dataset.validate(progress=True)
+print(report.head())
 # %%
