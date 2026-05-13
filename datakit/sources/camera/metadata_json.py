@@ -58,9 +58,26 @@ class MetadataJSON(TableSource):
         if absolute is not None:
             df["time_absolute"] = absolute
 
+        # Memory optimizations for full-length per-row arrays in the materialized
+        # output: downcast numeric counters and convert low-cardinality string
+        # columns to categoricals.
+        for col in ("ImageNumber",):
+            if col in df.columns:
+                numeric = pd.to_numeric(df[col], errors="coerce")
+                if numeric.notna().all() and (numeric >= 0).all() and numeric.max() < np.iinfo(np.uint32).max:
+                    df[col] = numeric.astype(np.uint32)
+        for col in ("Temperature",):
+            if col in df.columns:
+                numeric = pd.to_numeric(df[col], errors="coerce")
+                if numeric.notna().any():
+                    df[col] = numeric.astype(np.float32)
+        for col in ("Camera", self.device_column):
+            if col in df.columns:
+                df[col] = df[col].astype("category")
+
         meta = {
             "source_file": str(path),
-            "n_frames": len(df),
+            "n_frames": int(len(df)),
             "device_id": device_id,
             "json_entry_key": entry_key,
         }
@@ -97,7 +114,8 @@ class MetadataJSON(TableSource):
                 if not valid.empty:
                     origin = valid.iloc[0]
                     t = (timestamps - origin).dt.total_seconds().to_numpy(dtype=np.float64)
-                    absolute = timestamps.dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                    # Keep as datetime64[ns, UTC] (8 B/value) rather than ISO strings (~30 B/value).
+                    absolute = timestamps
             else:
                 scale = 1000.0 if column in self.millisecond_columns else 1.0
                 values = pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=np.float64)
