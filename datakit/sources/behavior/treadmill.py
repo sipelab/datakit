@@ -1,4 +1,12 @@
-"""Minimal treadmill loader aligned to dataqueue window (MVP)."""
+"""Treadmill loader.
+
+Data is reconstructed entirely from the central ``*_dataqueue.csv`` log: each
+``EncoderData(timestamp=..., distance=..., speed=...)`` payload row carries the
+full sample, already published on the master clock via ``queue_elapsed``. The
+per-session ``*_treadmill.csv`` is only consulted as a fallback when no
+dataqueue is available for that session (e.g. legacy fixtures used by the
+``treadmill_csv_fallback`` test).
+"""
 
 from __future__ import annotations
 
@@ -10,12 +18,21 @@ import pandas as pd
 
 from datakit.config import settings
 from datakit.sources.register import LoadContext, TimeseriesSource
+from datakit.timeline import DataqueueIndex
 
 
 class TreadmillSource(TimeseriesSource):
     """Load treadmill samples aligned to the experiment window."""
+
     tag = "treadmill"
-    patterns = ("**/*_treadmill.csv", "**/*_treadmill_data.csv")
+    # Discovered from either the dataqueue (primary, parsed from EncoderData
+    # payloads) or — when no dataqueue exists for the session — the standalone
+    # treadmill CSV.
+    patterns = (
+        "**/*_dataqueue.csv",
+        "**/*_treadmill.csv",
+        "**/*_treadmill_data.csv",
+    )
     camera_tag = None
     requires = ("dataqueue",)
 
@@ -24,6 +41,7 @@ class TreadmillSource(TimeseriesSource):
     speed_columns = ("speed_mm", "speed_mm_s", "speed")
     output_distance_column = "distance_mm"
     output_speed_column = "speed_mm"
+    timestamp_to_seconds = 1e-6
 
     dataqueue_queue_column = settings.timeline.queue_column
     dataqueue_device_id_column = "device_id"
@@ -32,6 +50,16 @@ class TreadmillSource(TimeseriesSource):
     dataqueue_payload_prefix = "EncoderData"
     timeline_master_patterns = ("dhyana", "mesoscope")
     _encoder_ts_re = re.compile(r"timestamp\s*=\s*(\d+)", re.IGNORECASE)
+    _encoder_payload_re = re.compile(
+        r"EncoderData\s*\("
+        r"\s*timestamp\s*=\s*(?P<ts>\d+)\s*,"
+        r"\s*distance\s*=\s*(?P<dist>-?\d+(?:\.\d+)?)"
+        r"(?:\s*[A-Za-z/]+)?\s*,"
+        r"\s*speed\s*=\s*(?P<speed>-?\d+(?:\.\d+)?)"
+        r"(?:\s*[A-Za-z/]+)?\s*\)",
+        re.IGNORECASE,
+    )
+
     def build_timeseries(
         self,
         path: Path,
@@ -39,6 +67,30 @@ class TreadmillSource(TimeseriesSource):
         context: LoadContext | None = None,
     ) -> tuple[np.ndarray, pd.DataFrame, dict]:
         context = self._require_context(context)
+        dq_path = context.path_for("dataqueue")
+
+        # Primary path: build from the dataqueue alone — the per-session
+        # treadmill CSV (if it exists) is ignored.
+        if dq_path is not None or context.dataqueue_frame is not None:
+            aligned, meta = self._build_from_dataqueue(
+                dq_path=dq_path,
+                dataqueue_frame=context.dataqueue_frame,
+                window=context.experiment_window,
+            )
+            t = aligned["time_elapsed_s"].to_numpy(dtype=np.float64)
+            meta = {
+                "source_file": str(dq_path) if dq_path is not None else None,
+                "dataqueue_file": str(dq_path) if dq_path is not None else None,
+                "n_samples": int(len(aligned)),
+                **meta,
+            }
+            return t, aligned, meta
+
+        # Fallback path: standalone treadmill CSV with no dataqueue available.
+        if path is None or not Path(path).exists() or Path(path).name.endswith("_dataqueue.csv"):
+            raise FileNotFoundError(
+                "TreadmillSource: no dataqueue available and no treadmill CSV path"
+            )
         df = pd.read_csv(path)
         dist = next((c for c in self.distance_columns if c in df.columns), None)
         speed = next((c for c in self.speed_columns if c in df.columns), None)
@@ -46,60 +98,138 @@ class TreadmillSource(TimeseriesSource):
             raise ValueError(f"Expected timestamp/distance/speed columns in {path}")
         df = df.rename(columns={dist: self.output_distance_column, speed: self.output_speed_column})
 
-        dq_path = context.path_for("dataqueue")
-        aligned, meta = self.extract_treadmill_aligned(
-            df,
-            dq_path,
-            window=context.experiment_window,
-            dataqueue_frame=context.dataqueue_frame,
-        )
+        aligned, meta = self._build_from_csv_fallback(df)
         t = aligned["time_elapsed_s"].to_numpy(dtype=np.float64)
         meta = {
             "source_file": str(path),
-            "dataqueue_file": str(dq_path) if dq_path is not None else None,
-            "n_samples": len(aligned),
+            "dataqueue_file": None,
+            "n_samples": int(len(aligned)),
             **meta,
         }
         return t, aligned, meta
 
-    # --- alignment --------------------------------
+    # --- dataqueue path -------------------------------------------------------
 
-    def extract_treadmill_aligned(
+    def _build_from_dataqueue(
         self,
-        treadmill_df: pd.DataFrame,
-        dq_path: Path | None,
         *,
-        window: tuple[float, float] | None = None,
-        dataqueue_frame: pd.DataFrame | None = None,
+        dq_path: Path | None,
+        dataqueue_frame: pd.DataFrame | None,
+        window: tuple[float, float] | None,
     ) -> tuple[pd.DataFrame, dict]:
         t0, t1 = window or self._window(dq_path, dataqueue_frame)
         duration = float(t1 - t0)
         if not np.isfinite(duration) or duration <= 0:
             raise ValueError(f"Invalid camera window duration from dataqueue: start={t0}, end={t1}")
 
-        enc = self._encoder_rows(dq_path, dataqueue_frame)
-        a, b = self._fit(enc["encoder_ts"].to_numpy(), enc["queue_elapsed"].to_numpy())
+        samples = self._encoder_samples(dq_path, dataqueue_frame)
+        queue_elapsed = samples["queue_elapsed"]
+        distance = samples["distance_mm"]
+        speed = samples["speed_mm"]
+        encoder_ts = samples["encoder_ts"]
 
-        ts = pd.to_numeric(treadmill_df[self.timestamp_column], errors="coerce").to_numpy(dtype=np.float64)
-        time_s = a * ts + b - t0
-
-        mask = np.isfinite(time_s) & (time_s >= 0.0) & (time_s <= duration)
+        time_s = queue_elapsed - t0
+        finite_vals = np.isfinite(distance) & np.isfinite(speed)
+        mask = (
+            np.isfinite(time_s)
+            & finite_vals
+            & (time_s >= 0.0)
+            & (time_s <= duration)
+        )
         if not np.any(mask):
-            raise ValueError("No treadmill samples fall inside the Dhyana window")
+            raise ValueError("No EncoderData samples fall inside the master window")
 
-        aligned = treadmill_df.loc[mask].copy()
-        aligned["time_elapsed_s"] = time_s[mask]
+        aligned = pd.DataFrame(
+            {
+                self.timestamp_column: encoder_ts[mask],
+                self.output_distance_column: distance[mask],
+                self.output_speed_column: speed[mask],
+                "time_elapsed_s": time_s[mask],
+            }
+        )
         aligned.sort_values("time_elapsed_s", inplace=True)
         aligned.reset_index(drop=True, inplace=True)
 
-        return aligned, {
-            "source_method": "dataqueue_align_mvp",
+        meta = {
+            "source_method": "dataqueue_encoder_payload",
             "experiment_window": {"start": float(t0), "end": float(t1)},
-            "alignment": {"a": float(a), "b": float(b)},
+            "n_encoder_payloads": int(queue_elapsed.size),
+            "n_kept": int(np.count_nonzero(mask)),
         }
+        return aligned, meta
 
-    # --- dataqueue utilities -----------------------------------------------------
+    def _encoder_samples(
+        self,
+        dq_path: Path | None,
+        dataqueue_frame: pd.DataFrame | None,
+    ) -> dict[str, np.ndarray]:
+        """Return parallel arrays parsed from EncoderData payloads.
 
+        Treadmill owns this parsing — the ``dataqueue`` source intentionally
+        treats payloads as opaque. We use the upstream frame only if the
+        payload column is still in its original string dtype (which is no
+        longer the case once ``DataqueueSource`` has run), otherwise we
+        re-read the raw CSV via ``dq_path``.
+        """
+
+        dq = dataqueue_frame
+        if dq is not None:
+            payload = dq.get(self.dataqueue_payload_column)
+            if payload is not None and (
+                pd.api.types.is_object_dtype(payload) or pd.api.types.is_string_dtype(payload)
+            ):
+                return self._parse_dataqueue_payloads(dq)
+        if dq_path is None:
+            raise ValueError(
+                "TreadmillSource: dataqueue payload is not string-typed and no path is "
+                "available to re-read EncoderData strings"
+            )
+        raw = pd.read_csv(
+            dq_path,
+            usecols=[self.dataqueue_queue_column, self.dataqueue_payload_column],
+            low_memory=False,
+        )
+        return self._parse_dataqueue_payloads(raw)
+
+    def _parse_dataqueue_payloads(self, dq: pd.DataFrame) -> dict[str, np.ndarray]:
+        if (
+            self.dataqueue_payload_column not in dq.columns
+            or self.dataqueue_queue_column not in dq.columns
+        ):
+            raise ValueError("Dataqueue frame missing payload or queue_elapsed column")
+
+        payload = dq[self.dataqueue_payload_column].astype(str)
+        mask = payload.str.contains(self.dataqueue_payload_prefix, na=False)
+        if not np.any(mask):
+            raise ValueError("No EncoderData payloads found in dataqueue")
+
+        sub_payloads = payload.loc[mask].to_numpy()
+        queue_full = pd.to_numeric(dq.loc[mask, self.dataqueue_queue_column], errors="coerce").to_numpy(dtype=np.float64)
+
+        ts_list: list[float] = []
+        dist_list: list[float] = []
+        speed_list: list[float] = []
+        q_list: list[float] = []
+        for value, q in zip(sub_payloads, queue_full):
+            if not np.isfinite(q):
+                continue
+            m = self._encoder_payload_re.search(value or "")
+            if m is None:
+                continue
+            ts_list.append(float(int(m.group("ts"))))
+            dist_list.append(float(m.group("dist")))
+            speed_list.append(float(m.group("speed")))
+            q_list.append(float(q))
+
+        if not ts_list:
+            raise ValueError("No parseable EncoderData payloads in dataqueue")
+
+        return {
+            "queue_elapsed": np.asarray(q_list, dtype=np.float64),
+            "encoder_ts": np.asarray(ts_list, dtype=np.float64),
+            "distance_mm": np.asarray(dist_list, dtype=np.float64),
+            "speed_mm": np.asarray(speed_list, dtype=np.float64),
+        }
 
     def _window(
         self,
@@ -126,64 +256,55 @@ class TreadmillSource(TimeseriesSource):
             raise ValueError("Could not find >=2 master camera rows in dataqueue")
         return float(rows.iloc[0]), float(rows.iloc[-1])
 
-    def _encoder_rows(
-        self,
-        dq_path: Path | None,
-        dataqueue_frame: pd.DataFrame | None,
-    ) -> pd.DataFrame:
-        dq = dataqueue_frame
-        if dq is None:
-            if dq_path is None:
-                raise FileNotFoundError("TreadmillSource: dataqueue path not available")
-            dq = pd.read_csv(
-                dq_path,
-                usecols=[self.dataqueue_queue_column, self.dataqueue_payload_column],
-                low_memory=False,
-            )
-        payload = dq[self.dataqueue_payload_column].astype(str)
+    # --- CSV-only fallback ----------------------------------------------------
 
-        # strict parse only from EncoderData payloads with timestamp=...
-        mask = payload.str.contains(self.dataqueue_payload_prefix, na=False)
-        if not np.any(mask):
-            raise ValueError("No EncoderData payloads found in dataqueue")
+    def _build_from_csv_fallback(
+        self, treadmill_df: pd.DataFrame
+    ) -> tuple[pd.DataFrame, dict]:
+        ts = pd.to_numeric(treadmill_df[self.timestamp_column], errors="coerce").to_numpy(dtype=np.float64)
+        finite = np.isfinite(ts)
+        if not np.any(finite):
+            raise ValueError("No valid treadmill timestamp samples")
 
-        enc = dq.loc[mask, [self.dataqueue_queue_column, self.dataqueue_payload_column]].copy()
-        enc["encoder_ts"] = enc[self.dataqueue_payload_column].apply(self._parse_encoder_ts)
+        aligned = treadmill_df.loc[finite].copy()
+        ts = ts[finite]
+        ts_i64 = np.rint(ts).astype(np.int64)
 
-        enc = enc.dropna(subset=["encoder_ts", self.dataqueue_queue_column])
-        enc = enc.rename(columns={self.dataqueue_queue_column: "queue_elapsed"})
-        enc["queue_elapsed"] = pd.to_numeric(enc["queue_elapsed"], errors="coerce")
-        enc = enc.dropna(subset=["queue_elapsed"])
+        unwrapped = DataqueueIndex.fix_32bit_wraparound(ts_i64).astype(np.float64)
+        # If the file contains a wrap, samples after the wrap may be out of order.
+        # Sort by unwrapped timestamp before computing elapsed time.
+        sort_idx = np.argsort(unwrapped)
+        unwrapped = unwrapped[sort_idx]
+        aligned = aligned.iloc[sort_idx].reset_index(drop=True)
+        elapsed = DataqueueIndex.relative(unwrapped) * self.timestamp_to_seconds
+        aligned["_elapsed"] = elapsed
 
-        if len(enc) < 2:
-            raise ValueError("Insufficient encoder samples for alignment")
-        return enc
+        aligned[self.output_distance_column] = pd.to_numeric(
+            aligned[self.output_distance_column], errors="coerce"
+        )
+        aligned[self.output_speed_column] = pd.to_numeric(
+            aligned[self.output_speed_column], errors="coerce"
+        )
+        aligned = aligned.dropna(
+            subset=[self.output_distance_column, self.output_speed_column, "_elapsed"]
+        )
+        if aligned.empty:
+            raise ValueError("Treadmill fallback produced no finite elapsed samples")
 
-    def _parse_encoder_ts(self, payload: str) -> int | None:
-        m = self._encoder_ts_re.search(payload or "")
-        return int(m.group(1)) if m else None
+        elapsed = aligned.pop("_elapsed").to_numpy(dtype=np.float64)
+        if elapsed.size > 1:
+            keep = np.concatenate(([True], np.diff(elapsed) > 0))
+            aligned = aligned.iloc[keep].copy()
+            elapsed = elapsed[keep]
+        if elapsed.size == 0:
+            raise ValueError("Treadmill fallback produced no usable samples after cleaning")
 
-    def _fit(self, encoder_ts: np.ndarray, queue_elapsed: np.ndarray) -> tuple[float, float]:
-        x = np.asarray(encoder_ts, dtype=np.float64)
-        y = np.asarray(queue_elapsed, dtype=np.float64)
-        mask = np.isfinite(x) & np.isfinite(y)
-        x = x[mask]
-        y = y[mask]
-        if x.size < 2:
-            raise ValueError("Insufficient encoder samples for alignment")
+        aligned["time_elapsed_s"] = elapsed
+        aligned.sort_values("time_elapsed_s", inplace=True)
+        aligned.reset_index(drop=True, inplace=True)
 
-        # Centered affine fit (stable for large microsecond timestamps)
-        x0 = float(x.mean())
-        y0 = float(y.mean())
-        xc = x - x0
-        yc = y - y0
-        denom = float(np.dot(xc, xc))
-        if denom <= 0:
-            raise ValueError("Degenerate encoder timestamps for alignment")
-
-        a = float(np.dot(xc, yc) / denom)
-        b = float(y0 - a * x0)
-
-        if not np.isfinite(a) or not np.isfinite(b):
-            raise ValueError("Encoder alignment fit returned non-finite coefficients")
-        return a, b
+        return aligned, {
+            "source_method": "treadmill_csv_fallback",
+            "experiment_window": None,
+            "alignment": None,
+        }
