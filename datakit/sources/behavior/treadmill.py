@@ -137,7 +137,20 @@ class TreadmillSource(TimeseriesSource):
             & (time_s <= duration)
         )
         if not np.any(mask):
-            raise ValueError("No EncoderData samples fall inside the master window")
+            # No treadmill samples in this session: return empty DataFrame and meta
+            aligned = pd.DataFrame({
+                self.timestamp_column: np.array([], dtype=np.float64),
+                self.output_distance_column: np.array([], dtype=np.float64),
+                self.output_speed_column: np.array([], dtype=np.float64),
+                "time_elapsed_s": np.array([], dtype=np.float64),
+            })
+            meta = {
+                "source_method": "dataqueue_encoder_payload",
+                "experiment_window": {"start": float(t0), "end": float(t1)},
+                "n_encoder_payloads": int(queue_elapsed.size),
+                "n_kept": 0,
+            }
+            return aligned, meta
 
         aligned = pd.DataFrame(
             {
