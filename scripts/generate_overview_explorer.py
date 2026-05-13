@@ -9,25 +9,6 @@ import numpy as np
 import pandas as pd
 
 
-TIME_OFFSET_THRESHOLD_S = 0.5
-
-
-def _maybe_shift_timebase(
-    t_source: np.ndarray,
-    time_axis: np.ndarray,
-    *,
-    label: str,
-    threshold_s: float = TIME_OFFSET_THRESHOLD_S,
-) -> tuple[np.ndarray, float]:
-    if t_source.size == 0 or time_axis.size == 0:
-        return t_source, 0.0
-    offset = float(t_source[0] - time_axis[0])
-    if abs(offset) >= threshold_s:
-        print(f"[WARN] {label}: shifting timebase by {offset:.3f}s to match master axis")
-        return t_source - offset, offset
-    return t_source, 0.0
-
-
 def _require_plotly():
     try:
         import plotly.graph_objects as go  # type: ignore[import]
@@ -62,63 +43,157 @@ def _mode_length(values: Sequence[int]) -> int:
     return max(counts, key=counts.get)
 
 
-def _extract_mesomap_traces(entry: pd.Series, *, roi_limit: Optional[int] = None) -> Tuple[np.ndarray, List[str]]:
-    meso_series = entry["mesomap"].drop("frame", errors="ignore")
+_MESO_SOURCE_SPECS: Dict[str, Dict[str, object]] = {
+    "mesomap": {
+        "source_tag": "mesomap",
+        "drop": ("frame", "time_elapsed_s"),
+        "keep": None,
+        "label": "mesomap",
+        # mesomap aligns its own time_elapsed_s to the dataqueue master clock
+        # via the meso camera anchors (see MesoMapSource._aligned_timeline).
+        "time_keys": (("mesomap", "time_elapsed_s"), ("time", "master_elapsed_s")),
+        "secondary_features": (),
+    },
+    "meso": {
+        "source_tag": "meso",
+        "drop": ("time_elapsed_s",),
+        "keep": ("Mean", "dF_F"),
+        "label": "meso",
+        # The meso CSV loader emits a frame-rate-only axis that is NOT
+        # aligned to the master clock. Prefer the meso camera metadata
+        # timestamps, which are derived from camera ElapsedTime and are
+        # already on the master clock.
+        "time_keys": (
+            ("meso_metadata", "time_elapsed_s"),
+            ("meso", "time_elapsed_s"),
+            ("time", "master_elapsed_s"),
+        ),
+        # Features routed to a right-hand y-axis on the top panel.
+        "secondary_features": ("dF_F",),
+    },
+}
+
+
+def _extract_mesomap_traces(
+    entry: pd.Series,
+    *,
+    source: str = "mesomap",
+    roi_limit: Optional[int] = None,
+) -> Tuple[np.ndarray, List[str]]:
+    spec = _MESO_SOURCE_SPECS.get(source)
+    if spec is None:
+        raise ValueError(f"Unknown mesomap source '{source}'")
+    source_tag = str(spec.get("source_tag", source))
+    if source_tag not in entry.index.get_level_values(0):
+        raise ValueError(f"No '{source_tag}' columns found in dataset entry")
+    meso_series = entry[source_tag]
+    for drop_name in spec.get("drop", ()) or ():
+        meso_series = meso_series.drop(drop_name, errors="ignore")
+    keep = spec.get("keep")
+    if keep:
+        meso_series = meso_series[[name for name in meso_series.index if name in keep]]
     meso_series = meso_series[meso_series.apply(_is_arraylike)]
     if meso_series.empty:
-        raise ValueError("No mesomap ROI traces found in dataset entry")
+        raise ValueError(f"No {spec['label']} ROI traces found in dataset entry")
 
     lengths = meso_series.apply(len)
-    target_len = _mode_length([int(val) for val in lengths.values])
-    meso_series = meso_series[lengths == target_len]
+    if keep:
+        # Explicit feature list: keep every requested column and truncate to
+        # the shortest array so heterogeneous lengths (e.g. Mean vs dF_F off
+        # by a frame) don't cause one to be silently dropped.
+        target_len = int(min(lengths.values))
+    else:
+        target_len = _mode_length([int(val) for val in lengths.values])
+        meso_series = meso_series[lengths == target_len]
     if meso_series.empty:
-        raise ValueError("No mesomap ROI traces with consistent length found")
+        raise ValueError(f"No {spec['label']} ROI traces with consistent length found")
 
     roi_names = list(meso_series.index)
     if roi_limit is not None:
         roi_names = roi_names[: int(roi_limit)]
-    meso_traces = np.stack([np.asarray(meso_series.loc[name]) for name in roi_names])
+    meso_traces = np.stack(
+        [np.asarray(meso_series.loc[name])[:target_len] for name in roi_names]
+    )
     return meso_traces, [str(name) for name in roi_names]
 
 
-def _extract_time_axis(entry: pd.Series, target_len: int) -> np.ndarray:
-    t_raw = np.asarray(entry[("time", "master_elapsed_s")])
-    if t_raw.size < target_len + 1:
-        raise ValueError("Time axis is shorter than mesomap traces")
-    return t_raw[:target_len]
-
-
-def _interp_trace(
+def _extract_time_axis(
     entry: pd.Series,
-    time_axis: np.ndarray,
+    target_len: int,
+    *,
+    source: str = "mesomap",
+) -> Tuple[np.ndarray, int]:
+    """Return a time axis matched to the trace length.
+
+    Returns (time_axis, matched_length). If the available axis is shorter
+    than ``target_len``, traces should be truncated to the returned length.
+    """
+    spec = _MESO_SOURCE_SPECS.get(source, {})
+    source_tag = str(spec.get("source_tag", source))
+    candidates: List[Tuple[str, str]] = []
+    for key in spec.get("time_keys", ()) or ():
+        if isinstance(key, tuple) and key in entry.index:
+            candidates.append(key)
+    if (source_tag, "time_elapsed_s") in entry.index:
+        candidates.append((source_tag, "time_elapsed_s"))
+    if ("time", "master_elapsed_s") in entry.index:
+        candidates.append(("time", "master_elapsed_s"))
+    seen: set = set()
+    for key in candidates:
+        if key in seen:
+            continue
+        seen.add(key)
+        t_raw = np.atleast_1d(np.asarray(entry[key]))
+        if t_raw.ndim != 1 or t_raw.size == 0:
+            continue
+        try:
+            if not np.isfinite(np.asarray(t_raw, dtype=np.float64)).any():
+                continue
+        except (TypeError, ValueError):
+            continue
+        matched = int(min(t_raw.size, target_len))
+        return t_raw[:matched], matched
+    # Final fallback: synthesize a frame-rate time axis. The mesoscope loader
+    # already uses ``np.arange(n)/50`` when no master clock is available, so
+    # mirroring that here keeps sessions without a dataqueue (e.g. older
+    # STREHAB02/03/05) renderable instead of failing outright.
+    if target_len > 0:
+        return np.arange(target_len, dtype=np.float64) / 50.0, int(target_len)
+    raise ValueError(
+        f"No time axis available for {spec.get('label', source)} traces"
+    )
+
+
+def _native_trace(
+    entry: pd.Series,
     *,
     source: str,
     feature: str,
-    method: str = "linear",
-    align_offset: bool = False,
-) -> Optional[np.ndarray]:
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Return (time, values) sampled on the source's own master-clock axis.
+
+    No interpolation/resampling is performed: plotly shares the x-axis across
+    panels, so each series stays on its native sampling grid and gaps remain
+    visible instead of being papered over with held-forward values.
+    """
     if (source, "time_elapsed_s") not in entry.index or (source, feature) not in entry.index:
         return None
-    t_source = np.asarray(entry[(source, "time_elapsed_s")])
-    values = np.asarray(entry[(source, feature)])
+    t_source = np.atleast_1d(np.asarray(entry[(source, "time_elapsed_s")], dtype=np.float64))
+    values = np.atleast_1d(np.asarray(entry[(source, feature)], dtype=np.float64))
     if t_source.size == 0 or values.size == 0:
         return None
     if t_source.size != values.size:
         raise ValueError(f"{source} time/value arrays mismatch")
+    finite = np.isfinite(t_source) & np.isfinite(values)
+    t_source = t_source[finite]
+    values = values[finite]
+    if t_source.size == 0:
+        return None
     order = np.argsort(t_source)
     t_source = t_source[order]
     values = values[order]
-    if t_source.size:
-        _, unique_idx = np.unique(t_source, return_index=True)
-        t_source = t_source[unique_idx]
-        values = values[unique_idx]
-    if align_offset:
-        t_source, _ = _maybe_shift_timebase(t_source, time_axis, label=source)
-    if method == "previous":
-        indices = np.searchsorted(t_source, time_axis, side="right") - 1
-        indices = np.clip(indices, 0, len(values) - 1)
-        return values[indices]
-    return np.interp(time_axis, t_source, values)
+    _, unique_idx = np.unique(t_source, return_index=True)
+    return t_source[unique_idx], values[unique_idx]
 
 
 def _build_explorer_figure(
@@ -126,11 +201,17 @@ def _build_explorer_figure(
     roi_names: Sequence[str],
     time_axis: np.ndarray,
     *,
-    pupil: Optional[np.ndarray],
-    treadmill: Optional[np.ndarray],
+    pupil: Optional[Tuple[np.ndarray, np.ndarray]],
+    treadmill: Optional[Tuple[np.ndarray, np.ndarray]],
     title: str,
+    secondary_features: Sequence[str] = (),
+    primary_y_label: str = "ΔF/F",
+    secondary_y_label: Optional[str] = None,
 ) -> object:
     go, make_subplots = _require_plotly()
+
+    secondary_set = {str(name) for name in secondary_features}
+    use_secondary = any(name in secondary_set for name in roi_names)
 
     fig = make_subplots(
         rows=3,
@@ -138,9 +219,15 @@ def _build_explorer_figure(
         shared_xaxes=True,
         vertical_spacing=0.03,
         row_heights=[0.6, 0.2, 0.2],
+        specs=[
+            [{"secondary_y": True}],
+            [{"secondary_y": False}],
+            [{"secondary_y": False}],
+        ],
     )
 
     for trace, name in zip(meso_traces, roi_names):
+        on_secondary = name in secondary_set
         fig.add_trace(
             go.Scatter(
                 x=time_axis,
@@ -153,13 +240,15 @@ def _build_explorer_figure(
             ),
             row=1,
             col=1,
+            secondary_y=on_secondary,
         )
 
     if pupil is not None:
+        t_pupil, y_pupil = pupil
         fig.add_trace(
             go.Scatter(
-                x=time_axis,
-                y=pupil,
+                x=t_pupil,
+                y=y_pupil,
                 name="Pupil diameter (mm)",
                 mode="lines",
                 line=dict(color="#EF553B", width=1.6),
@@ -171,10 +260,11 @@ def _build_explorer_figure(
         )
 
     if treadmill is not None:
+        t_tread, y_tread = treadmill
         fig.add_trace(
             go.Scatter(
-                x=time_axis,
-                y=treadmill,
+                x=t_tread,
+                y=y_tread,
                 name="Treadmill speed (mm)",
                 mode="lines",
                 line=dict(color="#00CC96", width=1.6),
@@ -194,7 +284,14 @@ def _build_explorer_figure(
         margin=dict(t=60, r=40, l=60, b=40),
     )
     fig.update_xaxes(title_text="Time (s)", row=3, col=1)
-    fig.update_yaxes(title_text="ΔF/F", row=1, col=1)
+    fig.update_yaxes(title_text=primary_y_label, row=1, col=1, secondary_y=False)
+    if use_secondary:
+        fig.update_yaxes(
+            title_text=secondary_y_label or "Secondary",
+            row=1,
+            col=1,
+            secondary_y=True,
+        )
     fig.update_yaxes(title_text="Pupil (mm)", row=2, col=1)
     fig.update_yaxes(title_text="Speed (mm)", row=3, col=1)
     return fig
@@ -344,10 +441,16 @@ def build_explorers_from_pickle(
     *,
     output_dir: Optional[Path] = None,
     roi_limit: Optional[int] = None,
+    source: str = "mesomap",
 ) -> List[Path]:
     dataset = pd.read_pickle(dataset_path)
     if not isinstance(dataset, pd.DataFrame):
         raise ValueError("Pickle file does not contain a pandas DataFrame")
+
+    if source not in _MESO_SOURCE_SPECS:
+        raise ValueError(
+            f"Unknown source '{source}'. Choose from: {sorted(_MESO_SOURCE_SPECS)}"
+        )
 
     out_dir = output_dir or dataset_path.parent / "mesomap_explorers"
     _ensure_dir(out_dir)
@@ -357,17 +460,33 @@ def build_explorers_from_pickle(
 
     for (subject, session, task), entry in _iter_entries(dataset):
         try:
-            meso_traces, roi_names = _extract_mesomap_traces(entry, roi_limit=roi_limit)
-            t_meso = _extract_time_axis(entry, meso_traces.shape[1])
-            pupil = _interp_trace(entry, t_meso, source="pupil", feature="pupil_diameter_mm")
-            treadmill = _interp_trace(
-                entry,
-                t_meso,
-                source="treadmill",
-                feature="speed_mm",
-                method="previous",
-                align_offset=True,
+            meso_traces, roi_names = _extract_mesomap_traces(
+                entry, source=source, roi_limit=roi_limit
             )
+            t_meso, matched_len = _extract_time_axis(
+                entry, meso_traces.shape[1], source=source
+            )
+            if matched_len < meso_traces.shape[1]:
+                meso_traces = meso_traces[:, :matched_len]
+            pupil = _native_trace(
+                entry, source="pupil_dlc", feature="pupil_diameter_mm"
+            )
+            if pupil is None:
+                # Older datasets used the bare "pupil" tag.
+                pupil = _native_trace(
+                    entry, source="pupil", feature="pupil_diameter_mm"
+                )
+            treadmill = _native_trace(
+                entry, source="treadmill", feature="speed_mm"
+            )
+            spec = _MESO_SOURCE_SPECS[source]
+            secondary_features = tuple(spec.get("secondary_features", ()) or ())
+            if source == "meso":
+                primary_label = "Mean (a.u.)"
+                secondary_label = "dF/F"
+            else:
+                primary_label = "ΔF/F"
+                secondary_label = None
             title = f"Subject {subject} | Session {session} | Task {task}"
             fig = _build_explorer_figure(
                 meso_traces,
@@ -376,6 +495,9 @@ def build_explorers_from_pickle(
                 pupil=pupil,
                 treadmill=treadmill,
                 title=title,
+                secondary_features=secondary_features,
+                primary_y_label=primary_label,
+                secondary_y_label=secondary_label,
             )
         except Exception as exc:
             print(f"[FAIL] {subject} {session} {task}: {exc}")
@@ -423,6 +545,12 @@ def main() -> int:
         default=None,
         help="Limit the number of ROIs plotted per explorer",
     )
+    parser.add_argument(
+        "--source",
+        choices=sorted(_MESO_SOURCE_SPECS.keys()),
+        default="mesomap",
+        help="Which mesoscope source to plot in the top panel",
+    )
     args = parser.parse_args()
 
     try:
@@ -430,6 +558,7 @@ def main() -> int:
             args.dataset_pickle,
             output_dir=args.output_dir,
             roi_limit=args.roi_limit,
+            source=args.source,
         )
     except Exception as exc:
         print(f"[FAIL] {exc}")
