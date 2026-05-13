@@ -74,3 +74,60 @@ class NewSensorSource(TimeseriesSource):
         ...
 ```
 
+## Sharing a `tag` Across Multiple Sources (Additive Columns)
+
+Two or more `DataSource` classes can share the same `tag` attribute so that
+their outputs merge into the same column block on the materialized DataFrame.
+This is useful when several files contribute different features that
+conceptually belong to one logical source.
+
+**Mechanics**
+- The **registry key** in `SOURCE_REGISTRY` must be unique per class — it
+  drives file discovery and produces one inventory column per key.
+- The class **`tag` attribute** is what `materialize()` uses as the top-level
+  column name on the output DataFrame.
+- When two classes share `tag`, their flattened payloads land under the same
+  `(tag, *)` block and sit side-by-side on each row.
+
+**Example — `MesoMeanSource` and `MesoDFFSource`** both declare `tag = "meso"`
+but match different file patterns, and are registered under distinct keys:
+
+```python
+# datakit/sources/analysis/mesoscope.py
+class MesoMeanSource(TimeseriesSource):
+    tag = "meso"
+    patterns = ("**/*_meso-mean-trace.csv",)
+    # build_timeseries returns a DataFrame with column "Mean"
+
+class MesoDFFSource(TimeseriesSource):
+    tag = "meso"
+    patterns = ("**/*_meso-collapse_first-trace.csv",)
+    # build_timeseries returns a DataFrame with column "dF_F"
+```
+
+```python
+# datakit/sources/__init__.py
+SOURCE_REGISTRY = {
+    ...
+    "meso_mean": MesoMeanSource,   # unique registry key
+    "meso_dff":  MesoDFFSource,    # unique registry key
+    ...
+}
+```
+
+After materialization, each row exposes both features under the shared `meso`
+block:
+
+```text
+("meso", "Mean")    ("meso", "dF_F")
+```
+
+**Caveats**
+- Feature names within the shared block must not collide; if two sub-sources
+  emit the same column name, the later writer wins for that cell.
+- Each sub-source is still discovered, loaded, and error-reported
+  independently under its own registry key (visible in `Dataset.sources`,
+  `inspect_sources()`, and `validate()` output).
+- Dependencies declared via `requires = (...)` reference **registry keys**,
+  not the shared `tag`.
+
