@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -66,7 +67,6 @@ def test_load_context_populates_legacy_fields(dataset):
     """
     from datakit.core import _make_context
     from datakit.datamodel import LoadedStream
-    import numpy as np
 
     fake_dq_frame = pd.DataFrame({
         "device_id": ["mesoscope", "mesoscope"],
@@ -105,3 +105,56 @@ def test_missing_dependency_yields_none_in_context():
     assert ctx.master_timeline is None
     assert ctx.dataqueue_frame is None
     assert ctx.experiment_window is None
+
+
+def test_treadmill_fallback_works_without_dataqueue(sample_experiment_2):
+    ds = Dataset.from_directory(sample_experiment_2, sources=["treadmill"])
+    df = ds.materialize(strict=True)
+
+    treadmill_cols = df.xs("treadmill", level=0, axis=1)
+    elapsed = np.asarray(treadmill_cols.iloc[0]["time_elapsed_s"], dtype=np.float64)
+
+    assert elapsed.size > 0
+    assert np.isfinite(elapsed).all()
+    assert np.all(np.diff(elapsed) > 0)
+
+    meta = treadmill_cols.iloc[0]["meta"]
+    assert meta["source_method"] == "treadmill_csv_fallback"
+
+
+def test_treadmill_fallback_with_missing_dataqueue_source(sample_experiment_2):
+    ds = Dataset.from_directory(sample_experiment_2, sources=["dataqueue", "treadmill"])
+    df = ds.materialize(strict=True)
+
+    treadmill_cols = df.xs("treadmill", level=0, axis=1)
+    elapsed = np.asarray(treadmill_cols.iloc[0]["time_elapsed_s"], dtype=np.float64)
+    assert elapsed.size > 0
+    assert np.all(np.diff(elapsed) > 0)
+
+
+def test_pupil_dlc_fallback_without_dataqueue_or_metadata(monkeypatch):
+    from pathlib import Path
+
+    from datakit.sources.analysis.pupil import PupilDLCSource
+    from datakit.sources.register import LoadContext
+
+    source = PupilDLCSource()
+    analyzed = pd.DataFrame({"pupil_diameter_mm": [0.9, 1.0, 1.1, 1.0]})
+    monkeypatch.setattr(source, "_analyze_pupil_h5", lambda _path: analyzed.copy())
+
+    context = LoadContext(
+        subject="STREHAB02",
+        session="ses-10",
+        task="task-widefield",
+        inventory_row={},
+        dependencies={"dataqueue": None, "pupil_metadata": None},
+    )
+
+    t, frame, meta = source.build_timeseries(Path("dummy_pupil_dlc.h5"), context=context)
+
+    expected = np.arange(len(analyzed), dtype=np.float64) / float(source.default_frame_rate_hz)
+    assert np.allclose(t, expected)
+    assert np.allclose(frame["time_elapsed_s"].to_numpy(dtype=np.float64), expected)
+    assert meta["time_basis"] == "assumed_frame_rate"
+    assert meta["assumed_frame_rate_hz"] == float(source.default_frame_rate_hz)
+    assert meta["pupil_metadata_file"] is None
