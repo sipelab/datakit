@@ -70,14 +70,16 @@ class Psychopy(IntervalSeriesSource):
         "trials_2.thisN",
         "trials_2.thisIndex",
         "trials2.thisN",
+        "trials.thisN",
         "trials.thisIndex",
         "description",
         "thisRow.t",
         "display_mov.started",
         "natural_mov.started",
         "display_mov.stopped",
-        "grey.started",
-        "grey.stopped",
+        # grey.started / grey.stopped are intentionally excluded here.
+        # Gray rows are a separate row type (trials.thisN is NaN) and are
+        # extracted independently via _extract_movies_gray(raw).
     )
     dataqueue_elapsed_column = "queue_elapsed"
     dataqueue_device_column = "device_id"
@@ -140,6 +142,25 @@ class Psychopy(IntervalSeriesSource):
                 aligned_table["gray_windows"] = [
                     self._build_window_list(aligned_table, "window_gray_start", "window_gray_stop")
                 ] * len(aligned_table)
+        if task_branch == "movies":
+            if "window_movies_start" in aligned_table.columns:
+                aligned_table["movies_windows"] = [
+                    self._build_window_list(aligned_table, "window_movies_start", "window_movies_stop")
+                ] * len(aligned_table)
+            # Gray rows were filtered out of aligned_table; re-extract from raw and align independently.
+            gray_rows = self._extract_movies_gray(raw)
+            if not gray_rows.empty:
+                aligned_gray = self._align_table(gray_rows, key_rt, dq_start)
+                aligned_table["gray_windows"] = [
+                    self._build_window_list(aligned_gray, "window_gray_start", "window_gray_stop")
+                ] * len(aligned_table)
+                # Join scalar gray start/stop per sequence block onto each movie row via trials_2.thisN.
+                if "trials_2.thisN" in aligned_gray.columns and "trials_2.thisN" in aligned_table.columns:
+                    gray_scalar = (
+                        aligned_gray[["trials_2.thisN", "window_gray_start", "window_gray_stop"]]
+                        .set_index("trials_2.thisN")
+                    )
+                    aligned_table = aligned_table.join(gray_scalar, on="trials_2.thisN")
 
         # 7) Build interval table and metrics.
         interval_start = None
@@ -147,6 +168,9 @@ class Psychopy(IntervalSeriesSource):
         if "window_grating_start" in aligned_table.columns and "window_grating_stop" in aligned_table.columns:
             interval_start = aligned_table["window_grating_start"]
             interval_stop = aligned_table["window_grating_stop"]
+        elif "window_movies_start" in aligned_table.columns and "window_movies_stop" in aligned_table.columns:
+            interval_start = aligned_table["window_movies_start"]
+            interval_stop = aligned_table["window_movies_stop"]
         elif "window_gray_start" in aligned_table.columns and "window_gray_stop" in aligned_table.columns:
             interval_start = aligned_table["window_gray_start"]
             interval_stop = aligned_table["window_gray_stop"]
@@ -359,6 +383,30 @@ class Psychopy(IntervalSeriesSource):
         return result
 
     def _extract_movies(self, frame: pd.DataFrame) -> pd.DataFrame:
-        return self._select_columns(frame, list(self.movies_columns))
+        selected = self._select_columns(frame, list(self.movies_columns))
+        trials_thisN = pd.to_numeric(selected.get("trials.thisN", pd.Series(dtype=float)), errors="coerce")
+        result = selected.loc[trials_thisN.notna()].copy()
+        if result.empty:
+            raise ValueError("Psychopy movies trials are empty.")
+
+        movies_start = self._coalesce_column(result, ["display_mov.started"])
+        movies_stop = self._coalesce_column(result, ["display_mov.stopped"])
+
+        result["window_movies_start"] = pd.to_numeric(movies_start, errors="coerce")
+        result["window_movies_stop"] = pd.to_numeric(movies_stop, errors="coerce")
+        return result
+
+    def _extract_movies_gray(self, frame: pd.DataFrame) -> pd.DataFrame:
+        trials_2 = pd.to_numeric(frame.get("trials_2.thisN", pd.Series(dtype=float)), errors="coerce")
+        trials = pd.to_numeric(frame.get("trials.thisN", pd.Series(dtype=float)), errors="coerce")
+        mask = trials_2.notna() & trials.isna()
+        # Include trials_2.thisN as the join key for merging back onto movie rows.
+        gray_cols = [c for c in ("trials_2.thisN", "grey.started", "grey.stopped") if c in frame.columns]
+        gray = frame.loc[mask, gray_cols].copy()
+        if gray.empty:
+            return gray
+        gray["window_gray_start"] = pd.to_numeric(gray.get("grey.started"), errors="coerce")
+        gray["window_gray_stop"] = pd.to_numeric(gray.get("grey.stopped"), errors="coerce")
+        return gray
 
     
