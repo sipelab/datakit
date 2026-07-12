@@ -140,17 +140,34 @@ materialized_report = explore(materialized)
 
 # `Dataset.save` materializes and writes to disk in one step.
 # Pickle by default; pass format="hdf5" or use a .h5/.hdf5 suffix for HDF5.
-etoH_root = Path(r"F:\251215_ETOH_RO1").resolve()
-etoH_dataset = Dataset.from_directory(etoH_root, sources=PIPELINE_TAGS)
+etoH_roots = [Path(r"F:\251215_ETOH_RO1")]#[Path(r"F:\251215_ETOH_RO1")]
 
-etoH_pickle_path = etoH_root / "processed" / "260204_dataset_mvp.pkl"
+PIPELINE_TAGS = (
+    "mesomap",
+    "timestamps",
+    "dataqueue",
+    "treadmill",
+    "wheel",
+    "notes",
+    "session_config",
+    "meso_metadata",
+    "pupil_metadata",
+    "pupil_dlc",
+    #"psychopy",
+)
+
+etoH_dataset = Dataset.from_directory(etoH_roots, 
+                                      sources=PIPELINE_TAGS
+).exclude(session=["ses-00", "ses-11"])
+
+etoH_pickle_path = "260513_ETOH.pkl"
 etoH_dataset.save(etoH_pickle_path, progress=True)
 print(f"ETOH dataset pickled to: {etoH_pickle_path}")
 
 # Optionally also write HDF5
-etoH_hdf_path = etoH_pickle_path.with_suffix(".h5")
-etoH_dataset.save(etoH_hdf_path, format="hdf5", progress=True)
-print(f"ETOH dataset stored at: {etoH_hdf_path}")
+# etoH_hdf_path = Path(etoH_pickle_path).with_suffix(".h5")
+# etoH_dataset.save(etoH_hdf_path, format="hdf5", progress=True)
+# print(f"ETOH dataset stored at: {etoH_hdf_path}")
 
 # Load pickle back into memory
 materialized = pd.read_pickle(etoH_pickle_path)
@@ -159,12 +176,27 @@ print("Loaded dataset from pickle with shape", materialized.shape)
 
 #%%
 # ─── Load and Merge ─────────────────────────────────────────────────────
-experiments = [r'E:\jgronemeyer\250921_HFSA', r'D:\jgronemeyer\250627_HFSA']  # r'D:\jgronemeyer\240324_HFSA',
+experiments = [r'E:\jgronemeyer\250921_HFSA', r'D:\jgronemeyer\250627_HFSA', r'D:\jgronemeyer\240324_HFSA']
+
+PIPELINE_TAGS = (
+    "meso_mean",
+    "meso_dff",
+    "timestamps",
+    "dataqueue",
+    "treadmill",
+    "notes",
+    "session_config",
+    "meso_metadata",
+    "pupil_metadata",
+    "pupil_dlc",
+)
 
 # `Dataset.from_directory` accepts a sequence of roots and concatenates them.
 experiment_paths = [Path(p) for p in experiments]
 
-merged_dataset = Dataset.from_directory(experiment_paths, sources=PIPELINE_TAGS).head(1)
+merged_dataset = Dataset.from_directory(experiment_paths, sources=PIPELINE_TAGS).exclude(session=["ses-00", "ses-11"])
+merged_dataset.add_note("STREHAB07 ses-08 meso data stops at frame 58227 due to the experiment stopping early.")
+merged_dataset.add_note("All meso data frame 1 values are duplicated from frame 2 to fix rolling shutter artifact on startup")
 inventory_report = explore(merged_dataset)
 
 # Per-source coverage report on the merged inventory.
@@ -172,7 +204,7 @@ coverage = datakit.inspect_sources(merged_dataset, sources=PIPELINE_TAGS)
 print(coverage)
 
 materialized = merged_dataset.materialize(progress=True)
-#materialized.to_pickle('260319_HFSA-full.pkl')
+materialized.to_pickle('260513_HFSA.pkl')
 
 # %%
 # ─── Validation report ───────────────────────────────────────────────────
