@@ -2,6 +2,9 @@ tests/sample_experiment3/
 tests/sample_experiment4/
 *.pkl
 datakit/logs
+/plotly-explorers
+/**/*.html
+/**/*.json
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
