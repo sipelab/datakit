@@ -11,7 +11,7 @@ import pandas as pd
 
 from ..._utils._logger import get_logger
 
-from datakit.sources.register import SourceContext, TimeseriesSource
+from datakit.sources.register import LoadContext, TimeseriesSource
 from datakit.timeline import DataqueueIndex
 
 logger = get_logger(__name__)
@@ -41,6 +41,7 @@ class WheelEncoder(TimeseriesSource):
     tag = "wheel"
     patterns = ("**/*_wheel.csv",)
     camera_tag = None  # Not bound to camera
+    requires = ("dataqueue",)
 
     required_columns = ("Clicks", "Time", "Speed")
     time_column = "Time"
@@ -61,7 +62,7 @@ class WheelEncoder(TimeseriesSource):
         self,
         path: Path,
         *,
-        context: SourceContext | None = None,
+        context: LoadContext | None = None,
     ) -> tuple[np.ndarray, pd.DataFrame, dict]:
         context = self._require_context(context)
         raw = pd.read_csv(path)
@@ -157,7 +158,7 @@ class WheelEncoder(TimeseriesSource):
     # ------------------------------------------------------------------
     # Alignment helpers
     # ------------------------------------------------------------------
-    def _align_to_dataqueue(self, frame: pd.DataFrame, context: SourceContext) -> tuple[pd.DataFrame, dict]:
+    def _align_to_dataqueue(self, frame: pd.DataFrame, context: LoadContext) -> tuple[pd.DataFrame, dict]:
         """Map wheel timestamps onto the nidaq master clock via dataqueue anchors."""
         dq_path = context.path_for("dataqueue")
         dataqueue_file = str(dq_path) if dq_path is not None else None

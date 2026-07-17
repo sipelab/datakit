@@ -7,7 +7,8 @@ from .behavior.treadmill import TreadmillSource
 from .behavior.dataqueue import DataqueueSource
 from .behavior.wheel import WheelEncoder
 from .behavior.psychopy import Psychopy
-from .analysis.mesoscope import MesoMeanSource
+from .behavior.mouseportal import MousePortalSource, MousePortalTrials
+from .analysis.mesoscope import MesoMeanSource, MesoDFFSource
 from .analysis.mesomap import MesoMapSource
 from .analysis.pupil import PupilDLCSource
 from .session.config import SessionConfigSource
@@ -23,7 +24,10 @@ SOURCE_REGISTRY: dict[str, type[DataSource]] = {
     "dataqueue": DataqueueSource,
     "wheel": WheelEncoder,
     "psychopy": Psychopy,
+    "mouseportal": MousePortalSource,
+    "mouseportal_trials": MousePortalTrials,
     "meso_mean": MesoMeanSource,
+    "meso_dff": MesoDFFSource,
     "mesomap": MesoMapSource,
     "pupil_dlc": PupilDLCSource,
     "session_config": SessionConfigSource,
@@ -51,7 +55,10 @@ __all__ = [
     "DataqueueSource",
     "WheelEncoder",
     "Psychopy",
+    "MousePortalSource",
+    "MousePortalTrials",
     "MesoMeanSource",
+    "MesoDFFSource",
     "MesoMapSource",
     "PupilDLCSource",
     "SessionConfigSource",

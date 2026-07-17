@@ -4,21 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datakit"
-version = "2025.11.22"
+dynamic = ["version"]
 description = "Datakit utilities"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
+dependencies = ["click", "numpy", "pandas", "rich"]
 
 [project.optional-dependencies]
 explore = ["rich"]
 
 [project.scripts]
-datakit = "datakit.__main__:main"
+datakit = "datakit.cli.datakit:datakit"
 
 [tool.setuptools]
 package-dir = { datakit = "datakit" }
 packages = [
     "datakit",
+    "datakit.cli",
     "datakit.sources",
+    "datakit.sources.analysis",
     "datakit.sources.behavior",
+    "datakit.sources.camera",
+    "datakit.sources.session",
+    "datakit._utils",
 ]
+
+[tool.setuptools.dynamic]
+version = { file = "VERSION" }
