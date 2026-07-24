@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Datakit utilities"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
-dependencies = ["click", "numpy", "pandas", "rich"]
+dependencies = ["click", "numpy", "pandas", "rich", "mesokit-schema"]
 
 [project.optional-dependencies]
 explore = ["rich"]
